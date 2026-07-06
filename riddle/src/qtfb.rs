@@ -109,6 +109,17 @@ impl QtfbClient {
                 "qtfb server rejected init (no reply)",
             ));
         }
+        #[cfg(target_pointer_width = "32")]
+        let min_reply = 12;
+        #[cfg(target_pointer_width = "64")]
+        let min_reply = 24;
+        if (n as usize) < min_reply {
+            unsafe { libc::close(fd) };
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("qtfb init reply too short: {n} < {min_reply}"),
+            ));
+        }
         let (shm_key, shm_size) = parse_init_reply(&reply)?;
 
         let shm_path = format!("/dev/shm/qtfb_{}\0", shm_key);

@@ -119,6 +119,9 @@ fn run() -> std::io::Result<()> {
         surf.stride
     );
 
+    // AppLoad's qtfb-shim intercepts the digitizer open() and feeds pen events
+    // from the qtfb socket into a virtual evdev fd. EVIOCGRAB fails on that fd
+    // even though it is the correct input path (tested on rM1 OS 3.22).
     let input_shim = std::env::var("LD_PRELOAD")
         .map(|v| v.contains("qtfb-shim"))
         .unwrap_or(false);
