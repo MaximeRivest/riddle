@@ -119,8 +119,15 @@ fn run() -> std::io::Result<()> {
         surf.stride
     );
 
+    let input_shim = std::env::var("LD_PRELOAD")
+        .map(|v| v.contains("qtfb-shim"))
+        .unwrap_or(false);
     let mut pen_dev = match pen::PenDevice::open() {
-        Ok(p) => Some(p),
+        Ok(p) if p.is_grabbed() || input_shim => Some(p),
+        Ok(_) => {
+            eprintln!("riddle: pen grab failed, using qtfb pen events");
+            None
+        }
         Err(e) => {
             eprintln!("riddle: raw pen unavailable ({e}), falling back to qtfb pen events");
             None
@@ -243,7 +250,7 @@ fn run() -> std::io::Result<()> {
         // ---- raw pen (preferred path) ----
         if let Some(ref mut pdev) = pen_dev {
             for s in pdev.drain() {
-                let writing = s.touching && s.pressure > 40;
+                let writing = s.pressure > 40 || (s.touching && s.pressure > 0);
                 stylus_on = writing;
                 stylus_tapped |= writing;
                 if !writing {

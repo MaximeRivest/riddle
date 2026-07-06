@@ -2,7 +2,8 @@
 //!
 //! Wire format (verified against rm-appload src/qtfb/common.h):
 //!   ClientMessage  = 24 bytes, type:u8 @0, payload @4
-//!   ServerMessage  = 32 bytes, type:u8 @0, payload @8
+//!   ServerMessage layout is ABI-dependent — aarch64 pads the union to @8,
+//!   armv7 places init/userInput fields immediately after the type byte @4.
 
 use std::io;
 use std::os::fd::RawFd;
@@ -19,7 +20,9 @@ pub const MESSAGE_REQUEST_FULL_REFRESH: u8 = 6;
 pub const UPDATE_ALL: i32 = 0;
 pub const UPDATE_PARTIAL: i32 = 1;
 
-/// FBFMT_RMPP_RGB565: native 1620x2160, 2 bytes/pixel, stride = 3240.
+/// FBFMT_RM2FB: native 1404x1872 on rM1/rM2, 2 bytes/pixel RGB565.
+pub const FBFMT_RM2FB: u8 = 0;
+/// FBFMT_RMPP_RGB565: native 1620x2160 on Paper Pro, 2 bytes/pixel.
 pub const FBFMT_RMPP_RGB565: u8 = 3;
 
 #[allow(dead_code)]
@@ -96,8 +99,7 @@ impl QtfbClient {
         msg[8] = format;
         send_all(fd, &msg)?;
 
-        // Init reply: shmKey i32 @8, shmSize u64 @16. Server closing without
-        // replying (recv == 0) means init was rejected.
+        // Init reply. Server closing without replying (recv == 0) means rejected.
         let mut reply = [0u8; 32];
         let n = unsafe { libc::recv(fd, reply.as_mut_ptr() as *mut libc::c_void, 32, 0) };
         if n <= 0 {
@@ -107,8 +109,7 @@ impl QtfbClient {
                 "qtfb server rejected init (no reply)",
             ));
         }
-        let shm_key = i32::from_le_bytes(reply[8..12].try_into().unwrap());
-        let shm_size = u64::from_le_bytes(reply[16..24].try_into().unwrap()) as usize;
+        let (shm_key, shm_size) = parse_init_reply(&reply)?;
 
         let shm_path = format!("/dev/shm/qtfb_{}\0", shm_key);
         let shm_fd = unsafe { libc::open(shm_path.as_ptr() as *const libc::c_char, libc::O_RDWR) };
@@ -232,14 +233,8 @@ impl QtfbClient {
                 }
                 return Err(e);
             }
-            if buf[0] == MESSAGE_USERINPUT && n >= 28 {
-                out.push(InputEvent {
-                    input_type: i32::from_le_bytes(buf[8..12].try_into().unwrap()),
-                    dev_id: i32::from_le_bytes(buf[12..16].try_into().unwrap()),
-                    x: i32::from_le_bytes(buf[16..20].try_into().unwrap()),
-                    y: i32::from_le_bytes(buf[20..24].try_into().unwrap()),
-                    d: i32::from_le_bytes(buf[24..28].try_into().unwrap()),
-                });
+            if let Some(evt) = parse_userinput(&buf[..n as usize]) {
+                out.push(evt);
             }
         }
     }
@@ -252,6 +247,54 @@ impl Drop for QtfbClient {
             libc::munmap(self.shm as *mut libc::c_void, self.shm_len);
             libc::close(self.fd);
         }
+    }
+}
+
+fn parse_init_reply(reply: &[u8; 32]) -> io::Result<(i32, usize)> {
+    // AppLoad's ServerMessage union is padded differently on 32- vs 64-bit ABIs.
+    #[cfg(target_pointer_width = "32")]
+    {
+        let shm_key = i32::from_le_bytes(reply[4..8].try_into().unwrap());
+        let shm_size = u32::from_le_bytes(reply[8..12].try_into().unwrap()) as usize;
+        Ok((shm_key, shm_size))
+    }
+    #[cfg(target_pointer_width = "64")]
+    {
+        let shm_key = i32::from_le_bytes(reply[8..12].try_into().unwrap());
+        let shm_size = u64::from_le_bytes(reply[16..24].try_into().unwrap()) as usize;
+        Ok((shm_key, shm_size))
+    }
+}
+
+fn parse_userinput(buf: &[u8]) -> Option<InputEvent> {
+    if buf.first().copied()? != MESSAGE_USERINPUT {
+        return None;
+    }
+    #[cfg(target_pointer_width = "32")]
+    {
+        if buf.len() < 24 {
+            return None;
+        }
+        Some(InputEvent {
+            input_type: i32::from_le_bytes(buf[4..8].try_into().ok()?),
+            dev_id: i32::from_le_bytes(buf[8..12].try_into().ok()?),
+            x: i32::from_le_bytes(buf[12..16].try_into().ok()?),
+            y: i32::from_le_bytes(buf[16..20].try_into().ok()?),
+            d: i32::from_le_bytes(buf[20..24].try_into().ok()?),
+        })
+    }
+    #[cfg(target_pointer_width = "64")]
+    {
+        if buf.len() < 28 {
+            return None;
+        }
+        Some(InputEvent {
+            input_type: i32::from_le_bytes(buf[8..12].try_into().ok()?),
+            dev_id: i32::from_le_bytes(buf[12..16].try_into().ok()?),
+            x: i32::from_le_bytes(buf[16..20].try_into().ok()?),
+            y: i32::from_le_bytes(buf[20..24].try_into().ok()?),
+            d: i32::from_le_bytes(buf[24..28].try_into().ok()?),
+        })
     }
 }
 

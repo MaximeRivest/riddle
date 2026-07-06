@@ -3,7 +3,7 @@ name = "riddle"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "The diary of Tom Riddle, for the reMarkable Paper Pro"
+description = "The diary of Tom Riddle, for the reMarkable Paper Pro (optional rM1/rM2 windowed build)"
 
 [dependencies]
 libc = "0.2"
@@ -15,6 +15,10 @@ ab_glyph = "0.2"
 ureq = { version = "2.10", default-features = false, features = ["tls"] }
 
 [features]
+default = []
+# reMarkable 1 / 2 (armv7, 1404x1872, Wacom digitizer, qtfb windowed only).
+# Default builds (no feature) are unchanged Paper Pro / aarch64 targets.
+rm1 = []
 # Link libquill.so (vendor e-ink engine C ABI) for full-takeover mode.
 takeover = []
 

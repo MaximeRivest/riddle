@@ -1,4 +1,5 @@
 riddle/target/
+riddle/dist-rm1/
 quill/build/
 quill/vendor/
 *.log

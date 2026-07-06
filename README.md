@@ -26,11 +26,13 @@ Already have xovi + AppLoad? **[Download the latest release](https://github.com/
 4. In **AppLoad**: tap **Reload**, then **The Diary**. Write, and rest your pen.
 
 > ⚠️ **This modifies your device.** It runs as root, stops the vendor UI
-> (in takeover mode), and drives the e-ink engine directly. It has only been
-> tested on a **reMarkable Paper Pro** (ferrari, aarch64, OS 3.26–3.27). It may
-> not work on other models or OS versions, and you use it entirely at your own
-> risk. Not affiliated with reMarkable AS. Keep SSH access working before you
-> install anything — that is your escape hatch.
+> (in takeover mode), and drives the e-ink engine directly. The Paper Pro
+> build has been tested on **reMarkable Paper Pro** (ferrari, aarch64, OS
+> 3.26–3.27). An experimental **reMarkable 1 / rM2** windowed build also exists
+> (see [below](#windowed-rm1--rm2-experimental)); it may not work on other models
+> or OS versions, and you use it entirely at your own risk. Not affiliated with
+> reMarkable AS. Keep SSH access working before you install anything — that is
+> your escape hatch.
 
 ## How it works
 
@@ -127,6 +129,27 @@ cargo build --release --target aarch64-unknown-linux-gnu
 
 Install to `/home/root/xovi/exthome/appload/riddle/` with
 `external.manifest.json`, `appload-launch.sh`, and the binary.
+
+### Windowed (rM1 / rM2, experimental)
+
+reMarkable 1 and rM2 (1404×1872, armv7, Wacom digitizer) can run the diary in
+**qtfb windowed mode only** — no `quill` takeover. Build with the `rm1` feature
+(default Paper Pro builds omit it):
+
+```sh
+cd riddle
+./build-rm1.sh    # → dist-rm1/
+```
+
+Copy `dist-rm1/` to `/home/root/xovi/exthome/appload/riddle/`. Use the bundled
+`external.manifest.json` (from `external.manifest.rm1.json`). The included
+`appload-launch-rm1.sh` preloads AppLoad's `qtfb-shim-32bit.so` so stylus input
+reaches the app while xochitl owns the real Wacom device.
+
+Requires [xovi + AppLoad](https://github.com/asivery/rm-appload) **arm32**.
+AppLoad **v0.4.2** is known-good on OS 3.22; newer hooks may crash on older OS
+builds. Gestures: write, flip marker to erase, large **?** for help; close the
+AppLoad window to quit (no 5-finger or power-button sleep in this mode).
 
 ### Takeover (instant ink) — the one from the demo
 
