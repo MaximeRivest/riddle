@@ -500,6 +500,11 @@ fn run() -> std::io::Result<()> {
                         let chars: usize = plan.strokes.iter().map(|s| s.len()).sum();
                         let linger = Duration::from_millis(4000 + (chars as u64) * 2);
                         let region = plan.region;
+                        // The ink dries: set the finished reply to full black.
+                        if !region.is_empty() {
+                            let (x, y, w, h) = region.rect();
+                            disp.crispen(x, y, w, h);
+                        }
                         State::Lingering { until: Instant::now() + linger.min(Duration::from_secs(20)), region }
                     } else {
                         State::Replying { plan, next: Instant::now() + Duration::from_millis(14), rx }
