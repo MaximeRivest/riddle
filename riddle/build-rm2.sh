@@ -9,6 +9,15 @@
 set -e
 cd "$(dirname "$0")"
 
+# Homebrew installs rustup keg-only (not symlinked into PATH); find it anyway.
+if ! command -v cargo >/dev/null 2>&1; then
+    for p in /opt/homebrew/opt/rustup/bin "$HOME/.cargo/bin"; do
+        [ -x "$p/cargo" ] && PATH="$p:$PATH" && break
+    done
+fi
+command -v cargo >/dev/null 2>&1 || {
+    echo "cargo not found — install Rust first: https://rustup.rs" >&2; exit 1; }
+
 TARGET=armv7-unknown-linux-musleabihf
 export RUSTFLAGS="-C target-feature=+crt-static"
 

@@ -25,7 +25,7 @@ APPLOAD_URL="https://github.com/asivery/rm-appload/releases/download/${APPLOAD_T
 TRIPLETAP_INSTALL_URL="https://raw.githubusercontent.com/rmitchellscott/xovi-tripletap/main/install.sh"
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
-BUNDLE="$HERE/dist/rm2/riddle"
+BUNDLE="$HERE/riddle/dist/rm2/riddle"
 
 say()  { printf '\033[1m== %s\033[0m\n' "$*"; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
