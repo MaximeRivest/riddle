@@ -403,6 +403,12 @@ fn run() -> std::io::Result<()> {
                     disp.update(x, y, w, h, true);
                     if stage + 1 >= STAGES {
                         user_ink.clear();
+                        // Fast-waveform dissolves leave gray ghosting that the
+                        // reply would then write over. One flashing refresh
+                        // cleans the page, hidden inside the thinking wait.
+                        let (rx0, ry0, rw, rh) = region.rect();
+                        surf.fill_rect(rx0.max(0) as usize, ry0.max(0) as usize, rw as usize, rh as usize, WHITE);
+                        disp.full_refresh(surf.w, surf.h);
                         State::Thinking { rx, pulse: Instant::now(), blot_on: false }
                     } else {
                         State::Drinking { stage: stage + 1, next: Instant::now() + Duration::from_millis(70), region, rx }
