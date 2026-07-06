@@ -31,7 +31,7 @@ impl PowerButton {
             if fd < 0 {
                 return Err(io::Error::last_os_error());
             }
-            let grabbed = unsafe { libc::ioctl(fd, EVIOCGRAB, 1i32) } == 0;
+            let grabbed = unsafe { libc::ioctl(fd, EVIOCGRAB as _, 1i32) } == 0;
             eprintln!("riddle: power button /dev/input/event{i} (grabbed: {grabbed})");
             return Ok(Self { fd, grabbed });
         }
@@ -61,7 +61,7 @@ impl PowerButton {
 impl Drop for PowerButton {
     fn drop(&mut self) {
         unsafe {
-            libc::ioctl(self.fd, EVIOCGRAB, 0i32);
+            libc::ioctl(self.fd, EVIOCGRAB as _, 0i32);
             libc::close(self.fd);
         }
     }

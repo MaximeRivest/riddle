@@ -30,7 +30,7 @@ impl TouchDevice {
                     if fd < 0 {
                         return Err(io::Error::last_os_error());
                     }
-                    unsafe { libc::ioctl(fd, EVIOCGRAB, 1i32) };
+                    unsafe { libc::ioctl(fd, EVIOCGRAB as _, 1i32) };
                     return Ok(Self { fd, slots: [false; MAX_SLOTS], cur: 0 });
                 }
             }
@@ -66,7 +66,7 @@ impl TouchDevice {
 impl Drop for TouchDevice {
     fn drop(&mut self) {
         unsafe {
-            libc::ioctl(self.fd, EVIOCGRAB, 0i32);
+            libc::ioctl(self.fd, EVIOCGRAB as _, 0i32);
             libc::close(self.fd);
         }
     }

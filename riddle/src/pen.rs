@@ -77,7 +77,7 @@ impl PenDevice {
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
-        let grab = unsafe { libc::ioctl(fd, EVIOCGRAB, 1i32) };
+        let grab = unsafe { libc::ioctl(fd, EVIOCGRAB as _, 1i32) };
         if grab != 0 {
             eprintln!("riddle: warning: EVIOCGRAB failed ({}) — xochitl will also see the pen", io::Error::last_os_error());
         }
@@ -156,7 +156,7 @@ impl PenDevice {
 impl Drop for PenDevice {
     fn drop(&mut self) {
         unsafe {
-            libc::ioctl(self.fd, EVIOCGRAB, 0i32);
+            libc::ioctl(self.fd, EVIOCGRAB as _, 0i32);
             libc::close(self.fd);
         }
     }
