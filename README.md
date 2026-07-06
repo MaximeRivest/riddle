@@ -149,18 +149,19 @@ the power button, a 5-finger tap, or SIGTERM. If anything wedges:
 
 ### reMarkable 2 (windowed only)
 
-The rM2 build targets 32-bit ARM and the rM2's 1404×1872 panel, and runs in
-windowed (AppLoad/qtfb) mode only — the takeover engine is Paper Pro-specific.
-Requires [xovi + AppLoad](https://github.com/asivery/rm-appload) on the device.
+The rM2 needs **no developer mode** — SSH is built in (password under
+Settings → Help → Copyrights → GPLv3 Compliance). One command installs
+everything: xovi, AppLoad, persistence, riddle, and your oracle key:
 
 ```sh
-rustup target add armv7-unknown-linux-musleabihf
-cd riddle && ./build-rm2.sh     # needs cargo-zigbuild + zig; emits dist/rm2/riddle/
-scp -O -r dist/rm2/riddle root@10.11.99.1:/home/root/xovi/exthome/appload/
+rustup target add armv7-unknown-linux-musleabihf   # once; needs zig + cargo-zigbuild
+cd riddle && ./build-rm2.sh && cd ..
+./scripts/install-rm2.sh        # USB; or RM_HOST=<tablet-ip> for Wi-Fi
 ```
 
-Then add your key in `oracle.env` as above, Reload in AppLoad, and open
-**The Diary**. Tested on reMarkable 2, OS 3.x.
+Full walkthrough, manual steps, and troubleshooting:
+**[docs/rm2-setup.md](docs/rm2-setup.md)**. The rM2 runs in windowed
+(AppLoad/qtfb) mode only — the takeover engine is Paper Pro-specific.
 
 ## Fonts
 

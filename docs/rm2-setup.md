@@ -1,83 +1,100 @@
 # riddle on the reMarkable 2 — setup from zero
 
 The rM2 needs no "developer mode": SSH as root is built into every unit.
-You need: the tablet, its USB-C cable, and ~20 minutes.
+You need: the tablet, its USB-C cable, and ~15 minutes.
 
-## 1. Get SSH access
+## Quick path (one command)
 
-1. On the tablet: **Settings → Help → Copyrights and licenses → GPLv3 Compliance**.
-   The password and IP (`10.11.99.1`) are shown at the bottom.
-2. Plug the tablet into your computer over USB.
-3. `ssh root@10.11.99.1` — enter that password.
-4. Recommended: install your key so future steps don't prompt:
-   `ssh-copy-id root@10.11.99.1`
-
-> **Keep SSH working.** It is the escape hatch for everything below. Note the
-> password somewhere safe. reMarkable OS updates can remove third-party
-> software (xovi, AppLoad, riddle) — they are reinstallable, but keep this in
-> mind before accepting an update.
-
-## 2. Install xovi + AppLoad
-
-riddle runs as an [AppLoad](https://github.com/asivery/rm-appload) app inside
-xochitl via the [xovi](https://github.com/asivery/xovi) extension framework.
-The maintained path is asivery's installer — follow the AppLoad README for the
-one-command install appropriate to your OS version. After install, a launcher
-chip appears in the tablet's UI; tap it to see the AppLoad screen.
-
-## 3. Build and install riddle (from a computer)
+1. On the tablet, read the root password: **Settings → Help → Copyrights and
+   licenses → GPLv3 Compliance** (bottom of the page; the IP shown is
+   `10.11.99.1`). Note the password somewhere safe.
+2. Plug the tablet in over USB.
+3. Build and install everything:
 
 ```sh
-rustup target add armv7-unknown-linux-musleabihf
-cd riddle && ./build-rm2.sh
-scp -O -r dist/rm2/riddle root@10.11.99.1:/home/root/xovi/exthome/appload/
+rustup target add armv7-unknown-linux-musleabihf   # once; needs zig + cargo-zigbuild
+cd riddle && ./build-rm2.sh && cd ..
+./scripts/install-rm2.sh
 ```
 
-## 4. Add the oracle key
+The installer connects over SSH (asking for that password once, then installing
+your key), confirms the device is an rM2, installs
+[xovi](https://github.com/asivery/xovi) +
+[AppLoad](https://github.com/asivery/rm-appload) from their official arm32
+releases, adds power-button persistence via
+[xovi-tripletap](https://github.com/rmitchellscott/xovi-tripletap)
+(triple-press = toggle xovi), copies the riddle bundle, prompts for your API
+key, and verifies the oracle end-to-end.
 
-```sh
-ssh root@10.11.99.1
-cd /home/root/xovi/exthome/appload/riddle
-cp oracle.env.example oracle.env
-vi oracle.env
+Then on the tablet: open **AppLoad → The Diary**, write, rest the pen ~3 s.
+
+> ⚠️ Everything here is reversible (`ssh root@10.11.99.1
+> /home/root/xovi/stock` or a reboot returns the stock UI), but reMarkable OS
+> updates can remove xovi/AppLoad/riddle — reinstallable by re-running the
+> installer. Keep the SSH password: it is your escape hatch.
+
+### If SSH says `Their offer: ssh-rsa`
+
+The rM2's SSH server only speaks the legacy `ssh-rsa` algorithm, which modern
+OpenSSH clients refuse by default. The installer handles this for its own
+connections; for your own `ssh`/`scp` sessions, add to `~/.ssh/config`:
+
+```
+Host remarkable rm2 10.11.99.1
+  HostName 10.11.99.1
+  User root
+  HostKeyAlgorithms +ssh-rsa
+  PubkeyAcceptedAlgorithms +ssh-rsa
 ```
 
-For OpenRouter:
+## The oracle key
+
+Any OpenAI-compatible, vision-capable endpoint works. The installer writes
+`oracle.env` for you; to change it later, edit
+`/home/root/xovi/exthome/appload/riddle/oracle.env` on the tablet. OpenRouter
+example:
 
 ```sh
 RIDDLE_OPENAI_KEY=sk-or-v1-...
 RIDDLE_OPENAI_BASE=https://openrouter.ai/api/v1
-RIDDLE_OPENAI_MODEL=openai/gpt-4o-mini    # any vision-capable model
+RIDDLE_OPENAI_MODEL=openai/gpt-4o-mini
 ```
 
-Verify before ever opening the diary (prints the streamed reply, no display
-needed) — run on the tablet:
+Test it any time (tablet must be on Wi-Fi — USB gives it no internet):
 
 ```sh
-cd /home/root/xovi/exthome/appload/riddle
-set -a; . ./oracle.env; set +a
-./riddle --oracle-test path/to/any-handwriting.png
+ssh rm2 'cd /home/root/xovi/exthome/appload/riddle && \
+  set -a && . ./oracle.env && set +a && ./riddle --oracle-test icon.png'
 ```
 
-The tablet must be on Wi-Fi (USB alone gives the tablet no internet).
+## Manual path (what the installer does, step by step)
 
-## 5. Run
+If you prefer to run each step yourself:
 
-AppLoad → **Reload** → **The Diary**. Write something, rest the pen ~3 s,
-and watch the page drink your ink.
+1. **xovi** — grab `xovi-arm32.tar.gz` from
+   [rm-xovi-extensions releases](https://github.com/asivery/rm-xovi-extensions/releases/latest)
+   (it contains the loader, start/stop scripts, and qt-resource-rebuilder), and
+   extract on the tablet: `tar -xzf xovi.tar.gz -C /home/root`.
+2. **AppLoad** — grab `appload-arm32.zip` from
+   [rm-appload releases](https://github.com/asivery/rm-appload/releases/latest).
+   `appload.so` goes to `/home/root/xovi/extensions.d/`; the `shims/` folder
+   goes to `/home/root/xovi/exthome/appload/shims/` (not extensions.d).
+3. **Persistence** — on the tablet:
+   `wget -qO- https://raw.githubusercontent.com/rmitchellscott/xovi-tripletap/main/install.sh | bash`
+4. **riddle** — `scp -O -r dist/rm2/riddle root@10.11.99.1:/home/root/xovi/exthome/appload/`,
+   then create `oracle.env` in that folder (see above).
+5. **Start** — `/home/root/xovi/start` on the tablet (or triple-press power).
 
 ## Troubleshooting
 
-- **Ink lands in the wrong place / mirrored** — the raw digitizer transform
-  is off for your unit. Relaunch with the qtfb fallback to compare:
-  temporarily rename the wacom grab away by launching `riddle` with the pen
-  device busy, or report it upstream; the qtfb pen path (used automatically
-  when the raw device can't be opened) is always correctly mapped.
-- **"qtfb server rejected init"** — AppLoad missing or old; reinstall/update
-  AppLoad, then Reload.
-- **No reply, blot pulses forever** — oracle problem: re-run `--oracle-test`;
-  check Wi-Fi, key, and that the model chosen supports images.
-- **Tablet acting up after experiments** — `ssh root@10.11.99.1 'systemctl
-  restart xochitl'` restores the stock UI; worst case a reboot (hold power
-  ~10 s) returns everything to normal. riddle in windowed mode never stops
-  xochitl, so the blast radius is small.
+- **Ink lands in the wrong place / mirrored** — the raw digitizer transform is
+  off for your unit. The qtfb pen fallback (used automatically when the raw
+  device can't be opened) is always correctly mapped — compare against it and
+  open an issue with what you see.
+- **"qtfb server rejected init"** — AppLoad missing or old; re-run the
+  installer, then Reload in AppLoad.
+- **No reply, ink blot pulses forever** — oracle problem: re-run
+  `--oracle-test`; check Wi-Fi, key, and that the model supports images.
+- **Tablet acting up** — `ssh rm2 'systemctl restart xochitl'` restores the
+  stock UI; worst case hold power ~10 s to reboot. riddle in windowed mode
+  never stops xochitl, so the blast radius is small.
