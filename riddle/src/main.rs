@@ -169,6 +169,10 @@ fn run() -> std::io::Result<()> {
     let mut stylus_on = false;
     let mut stylus_tapped = false;
     let mut ink_dirty = BBox::empty();
+    // Experiment: while drawing, stamp a tiny faded footprint beside the ink.
+    // This tests mixing precomposed pixel art with live pen updates.
+    let mut last_footstep: Option<(i32, i32)> = None;
+    let mut footstep_i: u32 = 0;
     let mut last_flush = Instant::now();
     // Takeover swaps are cheap and synchronous; qtfb needs coalescing.
     let flush_every = if takeover { Duration::from_millis(8) } else { Duration::from_millis(35) };
@@ -246,6 +250,7 @@ fn run() -> std::io::Result<()> {
                     if pen_down {
                         pen_down = false;
                         user_ink.pen_up();
+                        last_footstep = None;
                         if let State::Listening { ref mut last_pen } = state {
                             *last_pen = Some(Instant::now());
                         }
@@ -258,7 +263,15 @@ fn run() -> std::io::Result<()> {
                         let d = match s.tool {
                             pen::Tool::Pen => {
                                 let r = 2 + s.pressure * 3 / pen::MAX_PRESSURE;
-                                user_ink.pen_point(&mut surf, s.x, s.y, r)
+                                let mut d = user_ink.pen_point(&mut surf, s.x, s.y, r);
+                                if should_stamp_footstep(last_footstep, s.x, s.y) {
+                                    let f = draw_faded_footstep(&mut surf, s.x + 52, s.y - 38, footstep_i);
+                                    d.add(f.x0, f.y0, 0);
+                                    d.add(f.x1, f.y1, 0);
+                                    last_footstep = Some((s.x, s.y));
+                                    footstep_i = footstep_i.wrapping_add(1);
+                                }
+                                d
                             }
                             pen::Tool::Eraser => user_ink.erase_point(&mut surf, s.x, s.y, 22),
                         };
@@ -292,7 +305,14 @@ fn run() -> std::io::Result<()> {
                     if let State::Listening { ref mut last_pen } = state {
                         pen_down = true;
                         let r = 2 + ev.d.clamp(0, 100) / 45;
-                        let d = user_ink.pen_point(&mut surf, ev.x, ev.y, r);
+                        let mut d = user_ink.pen_point(&mut surf, ev.x, ev.y, r);
+                        if should_stamp_footstep(last_footstep, ev.x, ev.y) {
+                            let f = draw_faded_footstep(&mut surf, ev.x + 52, ev.y - 38, footstep_i);
+                            d.add(f.x0, f.y0, 0);
+                            d.add(f.x1, f.y1, 0);
+                            last_footstep = Some((ev.x, ev.y));
+                            footstep_i = footstep_i.wrapping_add(1);
+                        }
                         if !d.is_empty() {
                             ink_dirty.add(d.x0, d.y0, 0);
                             ink_dirty.add(d.x1, d.y1, 0);
@@ -307,6 +327,7 @@ fn run() -> std::io::Result<()> {
                     if pen_down {
                         pen_down = false;
                         user_ink.pen_up();
+                        last_footstep = None;
                         if let State::Listening { ref mut last_pen } = state {
                             *last_pen = Some(Instant::now());
                         }
@@ -516,6 +537,48 @@ fn run() -> std::io::Result<()> {
     eprintln!("riddle: the diary closes");
     disp.terminate();
     Ok(())
+}
+
+fn should_stamp_footstep(last: Option<(i32, i32)>, x: i32, y: i32) -> bool {
+    match last {
+        None => true,
+        Some((lx, ly)) => {
+            let dx = x - lx;
+            let dy = y - ly;
+            dx * dx + dy * dy >= 120 * 120
+        }
+    }
+}
+
+/// Stamp a tiny solid black footprint beside live ink.
+fn draw_faded_footstep(surf: &mut Surface, x: i32, y: i32, i: u32) -> BBox {
+    let side = if i % 2 == 0 { -1 } else { 1 };
+    let tilt = side * 5;
+    let mut bbox = BBox::empty();
+    solid_ellipse(surf, x, y, 8, 12, &mut bbox);
+    solid_ellipse(surf, x + side * 8, y - 15, 5, 7, &mut bbox);
+    solid_ellipse(surf, x + side * 2 + tilt, y - 25, 3, 4, &mut bbox);
+    solid_ellipse(surf, x + side * 9 + tilt, y - 27, 3, 4, &mut bbox);
+    solid_ellipse(surf, x + side * 15 + tilt, y - 23, 2, 3, &mut bbox);
+    bbox
+}
+
+fn solid_ellipse(
+    surf: &mut Surface,
+    cx: i32,
+    cy: i32,
+    rx: i32,
+    ry: i32,
+    bbox: &mut BBox,
+) {
+    for dy in -ry..=ry {
+        for dx in -rx..=rx {
+            if dx * dx * ry * ry + dy * dy * rx * rx <= rx * rx * ry * ry {
+                surf.put_px(cx + dx, cy + dy, BLACK);
+                bbox.add(cx + dx, cy + dy, 1);
+            }
+        }
+    }
 }
 
 /// Lay out reply text and produce screen-space strokes. `y_start` continues a

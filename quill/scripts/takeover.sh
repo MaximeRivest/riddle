@@ -1,9 +1,12 @@
 #!/bin/bash
 # Run a quill takeover app safely: stop xochitl, own the panel, and ALWAYS
 # bring xochitl back — on app exit, crash, or this script dying.
-# Usage: takeover.sh /home/root/quill/scribble
+# Usage: takeover.sh /home/root/quill/scribble [args...]
 
 APP="${1:-/home/root/quill/scribble}"
+if [ $# -gt 0 ]; then
+    shift
+fi
 
 restore() {
     rm -f /tmp/epframebuffer.lock
@@ -17,5 +20,5 @@ rm -f /tmp/epframebuffer.lock
 sleep 1
 
 cd "$(dirname "$APP")"
-LD_LIBRARY_PATH=/home/root/quill:/usr/lib/plugins/scenegraph "$APP"
+LD_LIBRARY_PATH=/home/root/quill:/usr/lib/plugins/scenegraph "$APP" "$@"
 echo "takeover: app exited ($?), restoring xochitl"

@@ -228,6 +228,8 @@ pub struct HttpOracle {
     base: String,   // e.g. https://api.openai.com/v1  (no trailing slash)
     key: String,
     model: String,
+    max_tokens: u32,
+    reasoning: Option<String>, // "reasoning_effort" value, e.g. "low"
 }
 
 impl HttpOracle {
@@ -241,8 +243,23 @@ impl HttpOracle {
         // A vision-capable default; override with RIDDLE_OPENAI_MODEL.
         let model = std::env::var("RIDDLE_OPENAI_MODEL")
             .unwrap_or_else(|_| "gpt-4o-mini".to_string());
-        eprintln!("riddle: http oracle base={base} model={model}");
-        Ok(Self { base, key, model })
+        // Thinking models (Gemini 3.x, o-series…) count hidden reasoning
+        // tokens against max_tokens: a tight cap starves the visible reply to
+        // one sentence (finish_reason=length). The persona already keeps
+        // replies short, so the cap is only a runaway guard — leave headroom.
+        let max_tokens = std::env::var("RIDDLE_OPENAI_MAX_TOKENS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2000);
+        // Sent as "reasoning_effort" only when set: reasoning models accept it
+        // ("low" ≈ faster first ink), but some providers reject the field on
+        // non-reasoning models, so it must stay out of the default request.
+        let reasoning = std::env::var("RIDDLE_OPENAI_REASONING").ok();
+        eprintln!(
+            "riddle: http oracle base={base} model={model} max_tokens={max_tokens} reasoning={}",
+            reasoning.as_deref().unwrap_or("-")
+        );
+        Ok(Self { base, key, model, max_tokens, reasoning })
     }
 
     pub fn ask(&self, png_path: &str, tx: Sender<Result<String, String>>) {
@@ -254,12 +271,18 @@ impl HttpOracle {
             }
         };
         let (base, key, model) = (self.base.clone(), self.key.clone(), self.model.clone());
+        let max_tokens = self.max_tokens;
+        let reasoning_field = self
+            .reasoning
+            .as_deref()
+            .map(|r| format!("\"reasoning_effort\":{},", json_quote(r)))
+            .unwrap_or_default();
 
         thread::spawn(move || {
             // OpenAI chat-completions with a data-URI image part, streaming.
             let body = format!(
                 concat!(
-                    "{{\"model\":{},\"stream\":true,\"max_tokens\":300,",
+                    "{{\"model\":{},\"stream\":true,\"max_tokens\":{},{}",
                     "\"messages\":[",
                     "{{\"role\":\"system\",\"content\":{}}},",
                     "{{\"role\":\"user\",\"content\":[",
@@ -268,6 +291,8 @@ impl HttpOracle {
                     "]}}]}}"
                 ),
                 json_quote(&model),
+                max_tokens,
+                reasoning_field,
                 json_quote(PERSONA),
                 json_quote("Reply to what is written in the diary."),
                 img,

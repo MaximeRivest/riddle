@@ -6,3 +6,4 @@ quill/vendor/
 # never commit a real API key
 riddle/oracle.env
 oracle.env
+riddle/dist/

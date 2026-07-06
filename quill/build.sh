@@ -35,4 +35,42 @@ $CC -O2 src/scribble.c \
     -Wl,-rpath,/home/root/quill \
     -o build/scribble
 
-echo "built: build/libquill.so build/scribble"
+# map_demo: static full-screen map + tiny partial-update footsteps.
+$CC -O2 src/map_demo.c \
+    -L build -lquill \
+    -L vendor -lqsgepaper \
+    -lQt6Gui -lQt6Core -lstdc++ \
+    -Wl,-rpath,/home/root/quill \
+    -o build/map_demo
+
+# image_demo: render a PNG/JPEG/etc. through Qt's QImage loader.
+$CXX -O2 \
+    -I "$QTINC" -I "$QTINC/QtCore" -I "$QTINC/QtGui" \
+    src/image_demo.cpp \
+    -L build -lquill \
+    -L vendor -lqsgepaper \
+    -lQt6Gui -lQt6Core -lstdc++ \
+    -Wl,-rpath,/home/root/quill \
+    -o build/image_demo
+
+# image_anim_demo: regional black/white fade animation experiment.
+$CXX -O2 \
+    -I "$QTINC" -I "$QTINC/QtCore" -I "$QTINC/QtGui" \
+    src/image_anim_demo.cpp \
+    -L build -lquill \
+    -L vendor -lqsgepaper \
+    -lQt6Gui -lQt6Core -lstdc++ \
+    -Wl,-rpath,/home/root/quill \
+    -o build/image_anim_demo
+
+# gif_demo: dither animated GIF frames and partial-update changed regions.
+$CXX -O2 \
+    -I "$QTINC" -I "$QTINC/QtCore" -I "$QTINC/QtGui" \
+    src/gif_demo.cpp \
+    -L build -lquill \
+    -L vendor -lqsgepaper \
+    -lQt6Gui -lQt6Core -lstdc++ \
+    -Wl,-rpath,/home/root/quill \
+    -o build/gif_demo
+
+echo "built: build/libquill.so build/scribble build/map_demo build/image_demo build/image_anim_demo build/gif_demo"

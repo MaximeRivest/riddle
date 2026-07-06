@@ -1,0 +1,66 @@
+{
+  "title": "The Diary — oracle settings",
+  "env": "oracle.env",
+  "fields": [
+    {
+      "key": "RIDDLE_OPENAI_KEY",
+      "label": "API key",
+      "kind": "secret",
+      "placeholder": "sk-… / AIza…",
+      "help": "Stored only on the tablet."
+    },
+    {
+      "key": "RIDDLE_OPENAI_BASE",
+      "label": "API base URL",
+      "kind": "text",
+      "placeholder": "https://api.openai.com/v1"
+    },
+    {
+      "key": "RIDDLE_OPENAI_MODEL",
+      "label": "Model",
+      "kind": "text",
+      "placeholder": "gpt-4o-mini",
+      "help": "Must be vision-capable."
+    },
+    {
+      "key": "RIDDLE_OPENAI_REASONING",
+      "label": "Reasoning effort",
+      "kind": "select",
+      "options": ["", "low", "medium", "high"],
+      "help": "Only for thinking models (Gemini 3.x, o-series). Leave empty otherwise."
+    },
+    {
+      "key": "RIDDLE_OPENAI_MAX_TOKENS",
+      "label": "Max tokens",
+      "kind": "text",
+      "placeholder": "2000",
+      "help": "Runaway guard. Thinking models count hidden reasoning tokens against it — keep it roomy."
+    }
+  ],
+  "presets": [
+    {
+      "name": "Gemini",
+      "values": {
+        "RIDDLE_OPENAI_BASE": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "RIDDLE_OPENAI_MODEL": "gemini-3.5-flash",
+        "RIDDLE_OPENAI_REASONING": "low"
+      }
+    },
+    {
+      "name": "OpenAI",
+      "values": {
+        "RIDDLE_OPENAI_BASE": "https://api.openai.com/v1",
+        "RIDDLE_OPENAI_MODEL": "gpt-4o-mini",
+        "RIDDLE_OPENAI_REASONING": ""
+      }
+    },
+    {
+      "name": "OpenRouter",
+      "values": {
+        "RIDDLE_OPENAI_BASE": "https://openrouter.ai/api/v1",
+        "RIDDLE_OPENAI_MODEL": "openai/gpt-4o-mini",
+        "RIDDLE_OPENAI_REASONING": ""
+      }
+    }
+  ]
+}
