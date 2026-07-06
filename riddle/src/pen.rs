@@ -140,7 +140,9 @@ impl PenDevice {
                     }
                     (EV_ABS, ABS_PRESSURE) => {
                         self.pressure = value;
-                        self.dirty = true;
+                        if self.touching {
+                            self.dirty = true;
+                        }
                     }
                     (EV_KEY, BTN_TOOL_PEN) if value == 1 => {
                         self.tool = Tool::Pen;
@@ -155,14 +157,13 @@ impl PenDevice {
                     (EV_SYN, SYN_REPORT) => {
                         if self.dirty {
                             self.dirty = false;
-                            let touching = self.touching || self.pressure > 0;
                             let (x, y) = digi_to_screen(self.raw_x, self.raw_y);
                             out.push(PenSample {
                                 x,
                                 y,
                                 pressure: self.pressure,
                                 tool: self.tool,
-                                touching,
+                                touching: self.touching,
                             });
                         }
                     }
