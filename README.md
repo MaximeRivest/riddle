@@ -1,159 +1,79 @@
-# riddle — the diary of Tom Riddle, for the reMarkable Paper Pro
+# Riddle for iPad
 
-Write on the page with your pen. After a pause, the diary **drinks your ink** —
-your words fade into the paper — the page thinks for a moment, and an answer
-writes itself back in a flowing hand, stroke by stroke, then fades away.
+An iPad port of [MaximeRivest/riddle](https://github.com/MaximeRivest/riddle) — Tom Riddle's enchanted diary, reimagined for Apple Pencil.
 
-No screen glow, no keyboard, no chat UI. Just ink appearing on paper.
+Write with Apple Pencil → the diary drinks your ink → Tom replies in handwriting that appears stroke by stroke.
 
-_This is the diary from [the demo](https://x.com/MaximeRivest)._
+## Screenshots
 
-### 🪄 New to this? Start here
+(Coming soon)
 
-You need a **reMarkable Paper Pro** in developer mode with a launcher installed.
-If that sounds like a lot, it isn't — **[remagic](https://github.com/maximerivest/remagic)**
-walks you through turning on developer mode and sets up everything with one
-command. Come back here, drop riddle in, and start writing to Tom.
+## Requirements
 
-Already have xovi + AppLoad? **[Download the latest release](https://github.com/MaximeRivest/riddle/releases/latest)** — a ready-to-drop bundle, no compiler needed — or [build from source](#building).
+- iPad with Apple Pencil support
+- iOS 17.0+
+- Xcode 26.6+
+- An API key for any OpenAI-compatible, vision-capable LLM
 
-### Install the prebuilt bundle
+## Setup
 
-1. Grab `riddle-appload-aarch64.zip` from the [latest release](https://github.com/MaximeRivest/riddle/releases/latest) and unzip it.
-2. Copy the folder to your tablet:
-   `scp -O -r riddle root@10.11.99.1:/home/root/xovi/exthome/appload/`
-3. Add an API key: `cp oracle.env.example oracle.env` in that folder and put your `RIDDLE_OPENAI_KEY` in it (any OpenAI-compatible key). Or skip it to use [pi](#option-b--pi-the-power-path).
-4. In **AppLoad**: tap **Reload**, then **The Diary**. Write, and rest your pen.
+1. Clone the repo
+2. Open `Riddle.xcodeproj` in Xcode (use [XcodeGen](https://github.com/yonaskolb/XcodeGen) to regenerate from `project.yml` if needed)
+3. Build and run on your iPad
+4. On first launch, the Settings screen will appear — enter your API configuration:
+   - **API Key**: Your API key
+   - **Base URL**: The API endpoint (defaults to OpenAI)
+   - **Model**: A vision-capable model name
 
-> ⚠️ **This modifies your device.** It runs as root, stops the vendor UI
-> (in takeover mode), and drives the e-ink engine directly. It has only been
-> tested on a **reMarkable Paper Pro** (ferrari, aarch64, OS 3.26–3.27). It may
-> not work on other models or OS versions, and you use it entirely at your own
-> risk. Not affiliated with reMarkable AS. Keep SSH access working before you
-> install anything — that is your escape hatch.
+## Supported APIs
 
-## How it works
+Any OpenAI-compatible `/chat/completions` endpoint that supports image input works:
 
-```
- pen (raw evdev, full 4096-level pressure, hardware event rate)
-   │ strokes
-   ▼
- riddle ── idle 2.8s → commit page → PNG ──► oracle (resident LLM process,
-   │                                          streams reply sentence-by-sentence)
-   ▼ strokes (Dancing Script → skeletonized to single-pixel pen paths)
- display backend
-   ├── qtfb        — windowed, inside xochitl (AppLoad app)
-   └── quill       — full takeover: xochitl stopped, vendor e-ink engine
-                     driven directly for instant ink (lowest latency there is)
-```
+| Provider | Base URL | Model |
+|----------|----------|-------|
+| OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` |
+| OpenRouter | `https://openrouter.ai/api/v1` | `openai/gpt-4o-mini` |
+| Volcano Ark | `https://ark.cn-beijing.volces.com/api/plan/v3` | `doubao-seed-2-0-pro` |
+| Groq | `https://api.groq.com/openai/v1` | `llama-3.2-90b-vision-preview` |
 
-- **`riddle/`** — the app (Rust). Pen input, ink surface, handwriting
-  synthesis (rasterize → Zhang-Suen thinning → stroke tracing → animated
-  replay), the oracle process manager, and both display backends.
-- **`quill/`** — the takeover display host (C/C++). An
-  [epfb-re](https://github.com/asivery)-style QImage-constructor interposition
-  shim over the vendor `libqsgepaper.so` waveform engine, exposed as a small
-  C ABI (`quill_init` / `quill_buffer` / `quill_swap`) that riddle links
-  against with `--features takeover`. Includes `scribble`, a minimal
-  pen-to-glass latency demo.
+Presets are available in the Settings screen.
 
-## Gestures
+## How It Works
 
-| Do this | And |
-|---------|-----|
-| Write, then rest the pen | The diary drinks your ink and Tom replies |
-| Flip the marker | Erase |
-| Draw a large **?** | Summon the built-in guide |
-| Tap five fingers at once | Leave the diary |
-| Power button | The page turns to *"The diary sleeps."*, then the tablet suspends; press again to wake exactly where you were |
+1. **Write** with Apple Pencil on the white page
+2. After 1.5s idle, the diary **drinks the ink** — pixels dissolve using a per-pixel hash
+3. The ink snapshot is sent as a PNG to your configured LLM **during** the dissolve (hides network latency)
+4. The model **reads your handwriting** from the image and replies as Tom Riddle
+5. The reply is rendered using **handwriting synthesis**: text is rasterized → Zhang-Suen skeletonized → stroke-traced → animated point by point
+6. After lingering, the reply **dissolves** the same way the ink did
 
-## The oracle (the "spirit" in the diary)
+## Architecture
 
-The diary's replies come from a vision LLM that reads your handwriting from the
-committed page (sent as an inline PNG). There are **two backends**, chosen at
-startup — pick whichever you have:
+Direct port of the original project's approach:
 
-### Option A — any OpenAI-compatible API (easiest, zero setup)
+- **Surface.swift** — Pixel buffer (like reMarkable's framebuffer). Direct `putPx`/`brushLine`/`stamp` operations.
+- **Ink** — Stroke capture, PNG export, pixel dissolve (`dissolve_pass` with `px_hash`)
+- **Oracle.swift** — HTTP client for OpenAI-compatible `/chat/completions`
+- **HandwritingSynthesis.swift** — Zhang-Suen thinning + stroke tracing (port of `script.rs`)
+- **DiaryCanvasView.swift** — Apple Pencil input via UIKit touches, draws directly to Surface
+- **DiaryViewModel.swift** — State machine: Listening → Drinking → Thinking → Replying → Lingering → Fading
 
-Set an API key and riddle talks straight to an OpenAI-compatible
-`/chat/completions` endpoint. Works with OpenAI, OpenRouter, Groq, a local
-server — anything that speaks the format. No extra software on the tablet.
+## Differences from Original
 
-```sh
-export RIDDLE_OPENAI_KEY="sk-..."                       # required
-export RIDDLE_OPENAI_BASE="https://api.openai.com/v1"   # optional (default)
-export RIDDLE_OPENAI_MODEL="gpt-4o-mini"                # optional; must see images
-```
+| | Original (reMarkable) | iPad Port |
+|---|---|---|
+| Platform | reMarkable Paper Pro | iPad + Apple Pencil |
+| Language | Rust | Swift / SwiftUI |
+| Pen Input | evdev `/dev/input/eventN` | UIKit `UITouch` (`.pencil` type only) |
+| Display | Linux framebuffer | UIView `draw()` + Surface bitmap |
+| API Config | `oracle.env` file | In-app Settings screen |
+| LLM | OpenAI-compatible (env vars) | OpenAI-compatible (UserDefaults) |
 
-Any vision-capable model works. Example with OpenRouter:
+## Credits
 
-```sh
-export RIDDLE_OPENAI_KEY="$OPENROUTER_API_KEY"
-export RIDDLE_OPENAI_BASE="https://openrouter.ai/api/v1"
-export RIDDLE_OPENAI_MODEL="openai/gpt-4o-mini"
-```
-
-Verify your setup before launching the diary:
-
-```sh
-riddle --oracle-test path/to/handwriting.png   # prints the streamed reply
-```
-
-Measured ~0.9–1.1 s to first ink on-device. The HTTPS is built into riddle
-(pure-Rust, no extra libraries).
-
-### Option B — pi (the power path)
-
-If you already run [`pi`](https://github.com/badlogic/pi-mono), riddle will use
-a resident `pi --mode rpc` process kept warm (Node + your subscription auth
-loaded once), so each turn pays only model latency. Used automatically when
-`RIDDLE_OPENAI_KEY` is **not** set.
-
-Both stream the reply sentence-by-sentence, so the quill starts writing seconds
-before the model finishes. The persona prompt lives in `riddle/src/oracle.rs`.
-
-## Building
-
-Cross-compiled from x86_64. Two flavours:
-
-### Windowed (AppLoad/qtfb) — easiest
-
-Requires [xovi + AppLoad](https://github.com/asivery/rm-appload) on the device.
-
-```sh
-cd riddle
-cargo build --release --target aarch64-unknown-linux-gnu
-```
-
-Install to `/home/root/xovi/exthome/appload/riddle/` with
-`external.manifest.json`, `appload-launch.sh`, and the binary.
-
-### Takeover (instant ink) — the one from the demo
-
-Requires the reMarkable SDK toolchain (`~/rm-sdk-3.26`) because the linked
-vendor Qt libs need its glibc, **and** `libqsgepaper.so` pulled from *your own
-device* (it is proprietary and not distributed here):
-
-```sh
-cd quill && ./build.sh          # pulls libqsgepaper.so from the device over ssh,
-                                # builds libquill.so + scribble
-cd ../riddle && ./build-takeover.sh
-```
-
-Deploy `libquill.so` to `/home/root/quill/` and `riddle-takeover` to
-`/home/root/riddle/riddle`, plus `scripts/riddle-takeover.sh`. Launching via
-AppLoad (`appload-launch.sh`) detaches into a transient systemd unit, stops
-xochitl, runs the diary, and **always restores xochitl on exit** — exit with
-the power button, a 5-finger tap, or SIGTERM. If anything wedges:
-`ssh root@10.11.99.1 'systemctl start xochitl'`.
-
-## Fonts
-
-The reply hand is [Dancing Script](https://github.com/googlefonts/DancingScript)
-(SIL OFL 1.1 — see `riddle/fonts/OFL.txt`).
+- Original project: [MaximeRivest/riddle](https://github.com/MaximeRivest/riddle)
+- Persona prompt, state machine, handwriting synthesis, and dissolve algorithm are direct ports from the original Rust source
 
 ## License
 
-MIT for everything in this repository (see `LICENSE`). The vendor libraries it
-interposes (`libqsgepaper.so`, Qt) are **not** included and must come from
-your own device/SDK.
+Same license as the original project.

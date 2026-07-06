@@ -1,9 +1,26 @@
-riddle/target/
-quill/build/
-quill/vendor/
-*.log
+# Xcode
+build/
+DerivedData/
+*.xcuserstate
+*.xcuserdatad/
+xcuserdata/
+*.xcscmblueprint
+*.xccheckout
 
-# never commit a real API key
-riddle/oracle.env
-oracle.env
-riddle/dist/
+# Swift Package Manager
+.swiftpm/
+.build/
+Package.resolved
+
+# macOS
+.DS_Store
+*.swp
+*~
+
+# Secrets — NEVER commit API keys
+*.env
+.env
+secrets.plist
+
+# Old experiment
+RiddlePlayground.swiftpm/
