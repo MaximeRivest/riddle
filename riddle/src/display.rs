@@ -29,17 +29,18 @@ impl Display {
     pub fn open() -> io::Result<(Self, Surface)> {
         if let Ok(key) = std::env::var("QTFB_KEY") {
             let key: i32 = key.parse().map_err(io::Error::other)?;
-            let mut client = crate::qtfb::QtfbClient::connect(
-                key,
-                crate::qtfb::FBFMT_RMPP_RGB565,
-                1620,
-                2160,
-                2,
-            )?;
+            #[cfg(feature = "rm1")]
+            let (fmt, w, h) = (crate::qtfb::FBFMT_RM2FB, 1404, 1872);
+            #[cfg(not(feature = "rm1"))]
+            let (fmt, w, h) = (crate::qtfb::FBFMT_RMPP_RGB565, 1620, 2160);
+            let mut client = crate::qtfb::QtfbClient::connect(key, fmt, w, h, 2)?;
+            #[cfg(feature = "rm1")]
+            let _ = client.set_refresh_mode(crate::qtfb::REFRESH_MODE_FAST);
+            #[cfg(not(feature = "rm1"))]
             let _ = client.set_refresh_mode(crate::qtfb::REFRESH_MODE_UFAST);
             let buf = client.framebuffer();
             let (ptr, len) = (buf.as_mut_ptr(), buf.len());
-            let surface = Surface::new(ptr, len, 1620, 2160, 1620 * 2, PixFmt::Rgb565);
+            let surface = Surface::new(ptr, len, w, h, w * 2, PixFmt::Rgb565);
             return Ok((Display::Qtfb(client), surface));
         }
 

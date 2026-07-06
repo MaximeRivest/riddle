@@ -119,8 +119,18 @@ fn run() -> std::io::Result<()> {
         surf.stride
     );
 
+    // AppLoad's qtfb-shim intercepts the digitizer open() and feeds pen events
+    // from the qtfb socket into a virtual evdev fd. EVIOCGRAB fails on that fd
+    // even though it is the correct input path (tested on rM1 OS 3.22).
+    let input_shim = std::env::var("LD_PRELOAD")
+        .map(|v| v.contains("qtfb-shim"))
+        .unwrap_or(false);
     let mut pen_dev = match pen::PenDevice::open() {
-        Ok(p) => Some(p),
+        Ok(p) if p.is_grabbed() || input_shim => Some(p),
+        Ok(_) => {
+            eprintln!("riddle: pen grab failed, using qtfb pen events");
+            None
+        }
         Err(e) => {
             eprintln!("riddle: raw pen unavailable ({e}), falling back to qtfb pen events");
             None
@@ -169,8 +179,8 @@ fn run() -> std::io::Result<()> {
     let mut stylus_on = false;
     let mut stylus_tapped = false;
     let mut ink_dirty = BBox::empty();
-    // Experiment: while drawing, stamp a tiny faded footprint beside the ink.
-    // This tests mixing precomposed pixel art with live pen updates.
+    // Takeover-only experiment: stamp a faded footprint beside live ink (quill
+    // partial-update demo). Disabled in windowed qtfb — looks like stray spats.
     let mut last_footstep: Option<(i32, i32)> = None;
     let mut footstep_i: u32 = 0;
     let mut last_flush = Instant::now();
@@ -264,7 +274,7 @@ fn run() -> std::io::Result<()> {
                             pen::Tool::Pen => {
                                 let r = 2 + s.pressure * 3 / pen::MAX_PRESSURE;
                                 let mut d = user_ink.pen_point(&mut surf, s.x, s.y, r);
-                                if should_stamp_footstep(last_footstep, s.x, s.y) {
+                                if takeover && should_stamp_footstep(last_footstep, s.x, s.y) {
                                     let f = draw_faded_footstep(&mut surf, s.x + 52, s.y - 38, footstep_i);
                                     d.add(f.x0, f.y0, 0);
                                     d.add(f.x1, f.y1, 0);
@@ -306,7 +316,7 @@ fn run() -> std::io::Result<()> {
                         pen_down = true;
                         let r = 2 + ev.d.clamp(0, 100) / 45;
                         let mut d = user_ink.pen_point(&mut surf, ev.x, ev.y, r);
-                        if should_stamp_footstep(last_footstep, ev.x, ev.y) {
+                        if takeover && should_stamp_footstep(last_footstep, ev.x, ev.y) {
                             let f = draw_faded_footstep(&mut surf, ev.x + 52, ev.y - 38, footstep_i);
                             d.add(f.x0, f.y0, 0);
                             d.add(f.x1, f.y1, 0);

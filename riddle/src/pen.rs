@@ -10,10 +10,20 @@ use std::os::fd::RawFd;
 
 use crate::fb::{SCREEN_H, SCREEN_W};
 
-// Digitizer axis ranges on the Paper Pro ("Elan marker input").
+// Digitizer axis ranges — Paper Pro uses "Elan marker input"; rM1/rM2 use Wacom.
+#[cfg(not(feature = "rm1"))]
 const DIGI_MAX_X: i32 = 11180;
+#[cfg(not(feature = "rm1"))]
 const DIGI_MAX_Y: i32 = 15340;
+#[cfg(not(feature = "rm1"))]
 pub const MAX_PRESSURE: i32 = 4096;
+
+#[cfg(feature = "rm1")]
+const DIGI_MAX_X: i32 = 20967;
+#[cfg(feature = "rm1")]
+const DIGI_MAX_Y: i32 = 15725;
+#[cfg(feature = "rm1")]
+pub const MAX_PRESSURE: i32 = 4095;
 
 const EV_SYN: u16 = 0;
 const EV_KEY: u16 = 1;
@@ -47,6 +57,7 @@ pub struct PenSample {
 
 pub struct PenDevice {
     fd: RawFd,
+    grabbed: bool,
     // Accumulated state between SYN_REPORTs.
     raw_x: i32,
     raw_y: i32,
@@ -69,9 +80,11 @@ impl PenDevice {
         if grab != 0 {
             eprintln!("riddle: warning: EVIOCGRAB failed ({}) — xochitl will also see the pen", io::Error::last_os_error());
         }
-        eprintln!("riddle: pen device {path} opened (grabbed: {})", grab == 0);
+        let grabbed = grab == 0;
+        eprintln!("riddle: pen device {path} opened (grabbed: {grabbed})");
         Ok(Self {
             fd,
+            grabbed,
             raw_x: 0,
             raw_y: 0,
             pressure: 0,
@@ -85,21 +98,37 @@ impl PenDevice {
         self.fd
     }
 
+    pub fn is_grabbed(&self) -> bool {
+        self.grabbed
+    }
+
     /// Drain all pending events; returns one sample per SYN_REPORT frame
     /// that changed state.
     pub fn drain(&mut self) -> Vec<PenSample> {
         let mut out = Vec::new();
-        // input_event on 64-bit: struct timeval (16) + type u16 + code u16 + value i32.
-        let mut buf = [0u8; 24 * 64];
+        #[cfg(target_pointer_width = "32")]
+        const EVENT_SIZE: usize = 16;
+        #[cfg(target_pointer_width = "64")]
+        const EVENT_SIZE: usize = 24;
+        let mut buf = [0u8; EVENT_SIZE * 64];
         loop {
             let n = unsafe { libc::read(self.fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
             if n <= 0 {
                 break;
             }
-            for chunk in buf[..n as usize].chunks_exact(24) {
-                let etype = u16::from_le_bytes(chunk[16..18].try_into().unwrap());
-                let code = u16::from_le_bytes(chunk[18..20].try_into().unwrap());
-                let value = i32::from_le_bytes(chunk[20..24].try_into().unwrap());
+            for chunk in buf[..n as usize].chunks_exact(EVENT_SIZE) {
+                #[cfg(target_pointer_width = "32")]
+                let (etype, code, value) = (
+                    u16::from_le_bytes(chunk[8..10].try_into().unwrap()),
+                    u16::from_le_bytes(chunk[10..12].try_into().unwrap()),
+                    i32::from_le_bytes(chunk[12..16].try_into().unwrap()),
+                );
+                #[cfg(target_pointer_width = "64")]
+                let (etype, code, value) = (
+                    u16::from_le_bytes(chunk[16..18].try_into().unwrap()),
+                    u16::from_le_bytes(chunk[18..20].try_into().unwrap()),
+                    i32::from_le_bytes(chunk[20..24].try_into().unwrap()),
+                );
                 match (etype, code) {
                     (EV_ABS, ABS_X) => {
                         self.raw_x = value;
@@ -111,7 +140,9 @@ impl PenDevice {
                     }
                     (EV_ABS, ABS_PRESSURE) => {
                         self.pressure = value;
-                        self.dirty = true;
+                        if self.touching {
+                            self.dirty = true;
+                        }
                     }
                     (EV_KEY, BTN_TOOL_PEN) if value == 1 => {
                         self.tool = Tool::Pen;
@@ -126,9 +157,10 @@ impl PenDevice {
                     (EV_SYN, SYN_REPORT) => {
                         if self.dirty {
                             self.dirty = false;
+                            let (x, y) = digi_to_screen(self.raw_x, self.raw_y);
                             out.push(PenSample {
-                                x: self.raw_x * (SCREEN_W as i32 - 1) / DIGI_MAX_X,
-                                y: self.raw_y * (SCREEN_H as i32 - 1) / DIGI_MAX_Y,
+                                x,
+                                y,
                                 pressure: self.pressure,
                                 tool: self.tool,
                                 touching: self.touching,
@@ -152,14 +184,41 @@ impl Drop for PenDevice {
     }
 }
 
+/// Map Wacom digitizer axes to portrait screen pixels.
+/// rM1/rM2 ABS_X/ABS_Y are rotated vs the framebuffer; this inverts the
+/// qtfb-shim translation (and matches the native kernel layout).
+#[cfg(feature = "rm1")]
+fn digi_to_screen(raw_x: i32, raw_y: i32) -> (i32, i32) {
+    let x = raw_y * (SCREEN_W as i32 - 1) / DIGI_MAX_Y;
+    let y = (DIGI_MAX_X - raw_x) * (SCREEN_H as i32 - 1) / DIGI_MAX_X;
+    (x.clamp(0, SCREEN_W as i32 - 1), y.clamp(0, SCREEN_H as i32 - 1))
+}
+
+#[cfg(not(feature = "rm1"))]
+fn digi_to_screen(raw_x: i32, raw_y: i32) -> (i32, i32) {
+    (
+        raw_x * (SCREEN_W as i32 - 1) / DIGI_MAX_X,
+        raw_y * (SCREEN_H as i32 - 1) / DIGI_MAX_Y,
+    )
+}
+
 fn find_marker_device() -> io::Result<String> {
     for i in 0..8 {
         let name_path = format!("/sys/class/input/event{i}/device/name");
         if let Ok(name) = std::fs::read_to_string(&name_path) {
-            if name.to_lowercase().contains("marker") {
+            let lower = name.to_lowercase();
+            #[cfg(feature = "rm1")]
+            let found = lower.contains("wacom");
+            #[cfg(not(feature = "rm1"))]
+            let found = lower.contains("marker");
+            if found {
                 return Ok(format!("/dev/input/event{i}"));
             }
         }
     }
-    Err(io::Error::new(io::ErrorKind::NotFound, "no marker input device found"))
+    #[cfg(feature = "rm1")]
+    let msg = "no Wacom digitizer found";
+    #[cfg(not(feature = "rm1"))]
+    let msg = "no marker input device found";
+    Err(io::Error::new(io::ErrorKind::NotFound, msg))
 }
