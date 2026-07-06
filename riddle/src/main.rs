@@ -36,9 +36,15 @@ use surface::{Surface, BLACK, WHITE};
 const FONT_TTF: &[u8] = include_bytes!("../fonts/DancingScript.ttf");
 const PNG_PATH: &str = "/tmp/riddle-page.png";
 
-const IDLE_COMMIT: Duration = Duration::from_millis(2800);
 const REPLY_PX: f32 = 96.0;
 const MARGIN_X: i32 = 120;
+
+/// Millisecond duration from the environment, with a default.
+fn env_ms(name: &str, default: u64) -> Duration {
+    Duration::from_millis(
+        std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default),
+    )
+}
 
 enum State {
     Listening { last_pen: Option<Instant> },
@@ -178,8 +184,14 @@ fn run() -> std::io::Result<()> {
     let mut last_footstep: Option<(i32, i32)> = None;
     let mut footstep_i: u32 = 0;
     let mut last_flush = Instant::now();
-    // Takeover swaps are cheap and synchronous; qtfb needs coalescing.
-    let flush_every = if takeover { Duration::from_millis(8) } else { Duration::from_millis(35) };
+    // Takeover swaps are cheap and synchronous; qtfb needs coalescing — but
+    // the interval is the dominant tunable ink latency, so let users trade
+    // CPU for feel (RIDDLE_FLUSH_MS).
+    let flush_every =
+        if takeover { Duration::from_millis(8) } else { env_ms("RIDDLE_FLUSH_MS", 12) };
+    // How long the pen must rest before the diary drinks the page. Raise it
+    // if it fires mid-thought while you pause (RIDDLE_IDLE_MS).
+    let idle_commit = env_ms("RIDDLE_IDLE_MS", 2800);
 
     eprintln!("riddle: the diary is open");
 
@@ -352,7 +364,7 @@ fn run() -> std::io::Result<()> {
         // ---- state machine ----
         state = match state {
             State::Listening { last_pen } => match last_pen {
-                Some(t) if !pen_down && t.elapsed() >= IDLE_COMMIT && !user_ink.is_empty() => {
+                Some(t) if !pen_down && t.elapsed() >= idle_commit && !user_ink.is_empty() => {
                     if help::looks_like_question_mark(user_ink.stroke_list()) {
                         // Absorb the "?" and open the guide instead of asking.
                         let (qx, qy, qw, qh) = user_ink.bbox.rect();
