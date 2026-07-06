@@ -37,23 +37,32 @@ die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 #    exactly this; clear it with: ssh-keygen -R 10.11.99.1
 #  - older firmware offers only ssh-rsa, which modern clients refuse by
 #    default — so keep ssh-rsa as an accepted fallback.
-SSH_OPTS=(-o HostKeyAlgorithms=ssh-ed25519,ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa)
-rm_ssh() { ssh "${SSH_OPTS[@]}" "root@$RM_HOST" "$@"; }
-rm_scp() { scp -O "${SSH_OPTS[@]}" "$@"; }
-
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+
+# One multiplexed SSH connection for the whole install (ControlMaster): the
+# password is typed at most once; every later command and copy rides it.
+SSH_OPTS=(-o HostKeyAlgorithms=ssh-ed25519,ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa
+          -o ControlMaster=auto -o "ControlPath=$WORK/ssh-ctrl" -o ControlPersist=300)
+rm_ssh() { ssh -n "${SSH_OPTS[@]}" "root@$RM_HOST" "$@"; }
+rm_ssh_stdin() { ssh "${SSH_OPTS[@]}" "root@$RM_HOST" "$@"; }
+rm_scp() { scp -O "${SSH_OPTS[@]}" "$@"; }
+cleanup() { ssh "${SSH_OPTS[@]}" -O exit "root@$RM_HOST" 2>/dev/null; rm -rf "$WORK"; }
+trap cleanup EXIT
 
 # --- 0. riddle bundle must exist locally -------------------------------------
 [ -x "$BUNDLE/riddle" ] || die "no rM2 bundle at $BUNDLE — run riddle/build-rm2.sh first"
 
 # --- 1. reach the tablet, install our key, confirm it is an rM2 --------------
-say "Connecting to $RM_HOST (the tablet will ask for its root password)"
-if ! rm_ssh true 2>/dev/null; then
+# BatchMode probe: succeeds only with key auth, so a password-only tablet
+# (e.g. fresh from a factory reset) correctly falls through to ssh-copy-id.
+if ! ssh -n "${SSH_OPTS[@]}" -o BatchMode=yes -o ConnectTimeout=5 "root@$RM_HOST" true 2>/dev/null; then
+    say "Installing your SSH key (type the tablet's password once — Settings > Help > GPLv3)"
     [ -f "$HOME/.ssh/id_ed25519.pub" ] || [ -f "$HOME/.ssh/id_rsa.pub" ] \
         || die "no SSH key found; create one with: ssh-keygen -t ed25519"
     ssh-copy-id "${SSH_OPTS[@]}" "root@$RM_HOST" || die "cannot reach root@$RM_HOST"
 fi
+echo "   Heads-up: one install step restarts the tablet UI. If your tablet"
+echo "   has a PIN, unlock it when the lock screen appears mid-install."
 MACHINE="$(rm_ssh 'cat /sys/devices/soc0/machine 2>/dev/null' || true)"
 case "$MACHINE" in
     "reMarkable 2.0") say "Found a reMarkable 2" ;;
@@ -103,11 +112,17 @@ if ! rm_ssh 'test -f /home/root/xovi/exthome/appload/riddle/oracle.env'; then
     printf 'API key for the oracle (OpenAI/OpenRouter/compatible; empty to skip): '
     read -r KEY
     if [ -n "$KEY" ]; then
-        printf 'API base URL [https://api.openai.com/v1]: '
-        read -r BASE; BASE="${BASE:-https://api.openai.com/v1}"
-        printf 'Vision model [gpt-4o-mini]: '
-        read -r MODEL; MODEL="${MODEL:-gpt-4o-mini}"
-        rm_ssh "cat > /home/root/xovi/exthome/appload/riddle/oracle.env" <<EOF
+        # Recognize the provider from the key so Enter-through-the-prompts
+        # does the right thing (an sk-or- key on the OpenAI base 401s).
+        case "$KEY" in
+            sk-or-*) DEF_BASE="https://openrouter.ai/api/v1"; DEF_MODEL="openai/gpt-4o-mini" ;;
+            *)       DEF_BASE="https://api.openai.com/v1";    DEF_MODEL="gpt-4o-mini" ;;
+        esac
+        printf 'API base URL [%s]: ' "$DEF_BASE"
+        read -r BASE; BASE="${BASE:-$DEF_BASE}"
+        printf 'Vision model [%s]: ' "$DEF_MODEL"
+        read -r MODEL; MODEL="${MODEL:-$DEF_MODEL}"
+        rm_ssh_stdin "cat > /home/root/xovi/exthome/appload/riddle/oracle.env" <<EOF
 RIDDLE_OPENAI_KEY=$KEY
 RIDDLE_OPENAI_BASE=$BASE
 RIDDLE_OPENAI_MODEL=$MODEL
