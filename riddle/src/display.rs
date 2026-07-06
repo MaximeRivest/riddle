@@ -108,28 +108,6 @@ impl Display {
         let _ = (w, h);
     }
 
-    /// "The ink dries": re-render a finished region with a quality waveform
-    /// so fast-waveform gray strokes set to full black. Costly (the qtfb
-    /// server stalls ~1s per mode switch) — call only when nothing is being
-    /// drawn, e.g. when a reply finishes.
-    pub fn crispen(&self, x: i32, y: i32, w: i32, h: i32) {
-        match self {
-            Display::Qtfb(c) => {
-                let _ = c.set_refresh_mode(crate::qtfb::REFRESH_MODE_UI);
-                let _ = c.update_partial(x, y, w, h);
-                let _ = c.set_refresh_mode(crate::qtfb::REFRESH_MODE_UFAST);
-            }
-            #[allow(unused_variables)]
-            Display::Quill => {
-                #[cfg(feature = "takeover")]
-                unsafe {
-                    quill_ffi::quill_swap(x, y, w, h, 3, 0);
-                    quill_ffi::quill_process_events();
-                }
-            }
-        }
-    }
-
     /// Flashing clear of the whole panel (ghost removal).
     pub fn full_refresh(&self, w: usize, h: usize) {
         match self {

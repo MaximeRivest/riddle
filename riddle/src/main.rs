@@ -49,7 +49,8 @@ fn env_ms(name: &str, default: u64) -> Duration {
 enum State {
     Listening { last_pen: Option<Instant> },
     Drinking { stage: u32, next: Instant, region: BBox, rx: mpsc::Receiver<Result<String, String>> },
-    Thinking { rx: mpsc::Receiver<Result<String, String>>, pulse: Instant, blot_on: bool },
+    /// `wrote` is where the user's (drunk) ink was: the reply starts below it.
+    Thinking { rx: mpsc::Receiver<Result<String, String>>, pulse: Instant, blot_on: bool, wrote: BBox },
     Replying { plan: WritePlan, next: Instant, rx: Option<mpsc::Receiver<Result<String, String>>> },
     Lingering { until: Instant, region: BBox },
     FadingReply { stage: u32, next: Instant, region: BBox },
@@ -403,13 +404,7 @@ fn run() -> std::io::Result<()> {
                     disp.update(x, y, w, h, true);
                     if stage + 1 >= STAGES {
                         user_ink.clear();
-                        // Fast-waveform dissolves leave gray ghosting that the
-                        // reply would then write over. One flashing refresh
-                        // cleans the page, hidden inside the thinking wait.
-                        let (rx0, ry0, rw, rh) = region.rect();
-                        surf.fill_rect(rx0.max(0) as usize, ry0.max(0) as usize, rw as usize, rh as usize, WHITE);
-                        disp.full_refresh(surf.w, surf.h);
-                        State::Thinking { rx, pulse: Instant::now(), blot_on: false }
+                        State::Thinking { rx, pulse: Instant::now(), blot_on: false, wrote: region }
                     } else {
                         State::Drinking { stage: stage + 1, next: Instant::now() + Duration::from_millis(70), region, rx }
                     }
@@ -418,7 +413,7 @@ fn run() -> std::io::Result<()> {
                 }
             }
 
-            State::Thinking { rx, pulse, blot_on } => match rx.try_recv() {
+            State::Thinking { rx, pulse, blot_on, wrote } => match rx.try_recv() {
                 Ok(result) => {
                     surf.fill_rect(SCREEN_W / 2 - 14, SCREEN_H / 2 - 14, 28, 28, WHITE);
                     disp.update(SCREEN_W as i32 / 2 - 14, SCREEN_H as i32 / 2 - 14, 28, 28, true);
@@ -431,7 +426,16 @@ fn run() -> std::io::Result<()> {
                             ("…".to_string(), None)
                         }
                     };
-                    let plan = plan_reply(&font, &text, None);
+                    // Ghosting from the drunk ink can't be cleared without a
+                    // flashing refresh, so write the reply below it when
+                    // there's room instead of on top of it.
+                    let below = wrote.y1 + 70;
+                    let y_start = if !wrote.is_empty() && below < SCREEN_H as i32 * 3 / 5 {
+                        Some(below)
+                    } else {
+                        None
+                    };
+                    let plan = plan_reply(&font, &text, y_start);
                     State::Replying { plan, next: Instant::now(), rx }
                 }
                 Err(mpsc::TryRecvError::Empty) => {
@@ -443,9 +447,9 @@ fn run() -> std::io::Result<()> {
                             surf.stamp(cx, cy, 9, BLACK);
                         }
                         disp.update(cx - 14, cy - 14, 28, 28, true);
-                        State::Thinking { rx, pulse: Instant::now(), blot_on: !blot_on }
+                        State::Thinking { rx, pulse: Instant::now(), blot_on: !blot_on, wrote }
                     } else {
-                        State::Thinking { rx, pulse, blot_on }
+                        State::Thinking { rx, pulse, blot_on, wrote }
                     }
                 }
                 Err(mpsc::TryRecvError::Disconnected) => State::Listening { last_pen: None },
@@ -500,11 +504,6 @@ fn run() -> std::io::Result<()> {
                         let chars: usize = plan.strokes.iter().map(|s| s.len()).sum();
                         let linger = Duration::from_millis(4000 + (chars as u64) * 2);
                         let region = plan.region;
-                        // The ink dries: set the finished reply to full black.
-                        if !region.is_empty() {
-                            let (x, y, w, h) = region.rect();
-                            disp.crispen(x, y, w, h);
-                        }
                         State::Lingering { until: Instant::now() + linger.min(Duration::from_secs(20)), region }
                     } else {
                         State::Replying { plan, next: Instant::now() + Duration::from_millis(14), rx }

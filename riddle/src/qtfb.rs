@@ -33,8 +33,6 @@ pub const FBFMT_RMPP_RGB565: u8 = 3;
 pub const REFRESH_MODE_UFAST: i32 = 0;
 #[allow(dead_code)]
 pub const REFRESH_MODE_FAST: i32 = 1;
-/// Highest-quality waveform ("UI"): slow, but renders full black.
-pub const REFRESH_MODE_UI: i32 = 4;
 
 // Input event types (server -> client).
 pub const INPUT_TOUCH_PRESS: i32 = 0x10;
