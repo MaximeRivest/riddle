@@ -7,7 +7,11 @@
 //! QTFB_KEY is set, or full takeover via the vendor engine (quill) when
 //! built with --features takeover and launched with xochitl stopped.
 
+#[cfg(all(feature = "rm2", feature = "takeover"))]
+compile_error!("takeover mode drives the Paper Pro's vendor engine; build rm2 without --features takeover");
+
 mod display;
+mod evdev;
 mod fb;
 mod help;
 mod ink;
@@ -32,14 +36,21 @@ use surface::{Surface, BLACK, WHITE};
 const FONT_TTF: &[u8] = include_bytes!("../fonts/DancingScript.ttf");
 const PNG_PATH: &str = "/tmp/riddle-page.png";
 
-const IDLE_COMMIT: Duration = Duration::from_millis(2800);
 const REPLY_PX: f32 = 96.0;
 const MARGIN_X: i32 = 120;
+
+/// Millisecond duration from the environment, with a default.
+fn env_ms(name: &str, default: u64) -> Duration {
+    Duration::from_millis(
+        std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default),
+    )
+}
 
 enum State {
     Listening { last_pen: Option<Instant> },
     Drinking { stage: u32, next: Instant, region: BBox, rx: mpsc::Receiver<Result<String, String>> },
-    Thinking { rx: mpsc::Receiver<Result<String, String>>, pulse: Instant, blot_on: bool },
+    /// `wrote` is where the user's (drunk) ink was: the reply starts below it.
+    Thinking { rx: mpsc::Receiver<Result<String, String>>, pulse: Instant, blot_on: bool, wrote: BBox },
     Replying { plan: WritePlan, next: Instant, rx: Option<mpsc::Receiver<Result<String, String>>> },
     Lingering { until: Instant, region: BBox },
     FadingReply { stage: u32, next: Instant, region: BBox },
@@ -174,8 +185,14 @@ fn run() -> std::io::Result<()> {
     let mut last_footstep: Option<(i32, i32)> = None;
     let mut footstep_i: u32 = 0;
     let mut last_flush = Instant::now();
-    // Takeover swaps are cheap and synchronous; qtfb needs coalescing.
-    let flush_every = if takeover { Duration::from_millis(8) } else { Duration::from_millis(35) };
+    // Takeover swaps are cheap and synchronous; qtfb needs coalescing — but
+    // the interval is the dominant tunable ink latency, so let users trade
+    // CPU for feel (RIDDLE_FLUSH_MS).
+    let flush_every =
+        if takeover { Duration::from_millis(8) } else { env_ms("RIDDLE_FLUSH_MS", 12) };
+    // How long the pen must rest before the diary drinks the page. Raise it
+    // if it fires mid-thought while you pause (RIDDLE_IDLE_MS).
+    let idle_commit = env_ms("RIDDLE_IDLE_MS", 2800);
 
     eprintln!("riddle: the diary is open");
 
@@ -348,7 +365,7 @@ fn run() -> std::io::Result<()> {
         // ---- state machine ----
         state = match state {
             State::Listening { last_pen } => match last_pen {
-                Some(t) if !pen_down && t.elapsed() >= IDLE_COMMIT && !user_ink.is_empty() => {
+                Some(t) if !pen_down && t.elapsed() >= idle_commit && !user_ink.is_empty() => {
                     if help::looks_like_question_mark(user_ink.stroke_list()) {
                         // Absorb the "?" and open the guide instead of asking.
                         let (qx, qy, qw, qh) = user_ink.bbox.rect();
@@ -387,7 +404,7 @@ fn run() -> std::io::Result<()> {
                     disp.update(x, y, w, h, true);
                     if stage + 1 >= STAGES {
                         user_ink.clear();
-                        State::Thinking { rx, pulse: Instant::now(), blot_on: false }
+                        State::Thinking { rx, pulse: Instant::now(), blot_on: false, wrote: region }
                     } else {
                         State::Drinking { stage: stage + 1, next: Instant::now() + Duration::from_millis(70), region, rx }
                     }
@@ -396,7 +413,7 @@ fn run() -> std::io::Result<()> {
                 }
             }
 
-            State::Thinking { rx, pulse, blot_on } => match rx.try_recv() {
+            State::Thinking { rx, pulse, blot_on, wrote } => match rx.try_recv() {
                 Ok(result) => {
                     surf.fill_rect(SCREEN_W / 2 - 14, SCREEN_H / 2 - 14, 28, 28, WHITE);
                     disp.update(SCREEN_W as i32 / 2 - 14, SCREEN_H as i32 / 2 - 14, 28, 28, true);
@@ -409,7 +426,16 @@ fn run() -> std::io::Result<()> {
                             ("…".to_string(), None)
                         }
                     };
-                    let plan = plan_reply(&font, &text, None);
+                    // Ghosting from the drunk ink can't be cleared without a
+                    // flashing refresh, so write the reply below it when
+                    // there's room instead of on top of it.
+                    let below = wrote.y1 + 70;
+                    let y_start = if !wrote.is_empty() && below < SCREEN_H as i32 * 3 / 5 {
+                        Some(below)
+                    } else {
+                        None
+                    };
+                    let plan = plan_reply(&font, &text, y_start);
                     State::Replying { plan, next: Instant::now(), rx }
                 }
                 Err(mpsc::TryRecvError::Empty) => {
@@ -421,9 +447,9 @@ fn run() -> std::io::Result<()> {
                             surf.stamp(cx, cy, 9, BLACK);
                         }
                         disp.update(cx - 14, cy - 14, 28, 28, true);
-                        State::Thinking { rx, pulse: Instant::now(), blot_on: !blot_on }
+                        State::Thinking { rx, pulse: Instant::now(), blot_on: !blot_on, wrote }
                     } else {
-                        State::Thinking { rx, pulse, blot_on }
+                        State::Thinking { rx, pulse, blot_on, wrote }
                     }
                 }
                 Err(mpsc::TryRecvError::Disconnected) => State::Listening { last_pen: None },

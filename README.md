@@ -147,6 +147,25 @@ xochitl, runs the diary, and **always restores xochitl on exit** — exit with
 the power button, a 5-finger tap, or SIGTERM. If anything wedges:
 `ssh root@10.11.99.1 'systemctl start xochitl'`.
 
+### reMarkable 2 (windowed only)
+
+The rM2 needs **no developer mode** — SSH is built in (password under
+Settings → Help → Copyrights → GPLv3 Compliance). One command installs
+everything: xovi, AppLoad, persistence, riddle, and your oracle key:
+
+```sh
+rustup target add armv7-unknown-linux-musleabihf   # once; needs zig + cargo-zigbuild
+cd riddle && ./build-rm2.sh && cd ..
+./scripts/install-rm2.sh        # USB; or RM_HOST=<tablet-ip> for Wi-Fi
+```
+
+Full walkthrough, manual steps, and troubleshooting:
+**[docs/rm2-setup.md](docs/rm2-setup.md)**. The rM2 runs in windowed
+(AppLoad/qtfb) mode only — the takeover engine is Paper Pro-specific, so
+your own ink echoes with visible latency (tunable via `RIDDLE_FLUSH_MS`
+and `RIDDLE_IDLE_MS` in `oracle.env`, but the compositor pipeline sets a
+floor). Treat it as a delightful demo, not a notes replacement.
+
 ## Fonts
 
 The reply hand is [Dancing Script](https://github.com/googlefonts/DancingScript)

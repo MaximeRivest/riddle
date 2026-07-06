@@ -8,11 +8,23 @@
 use std::io;
 use std::os::fd::RawFd;
 
+use crate::evdev;
 use crate::fb::{SCREEN_H, SCREEN_W};
 
 // Digitizer axis ranges on the Paper Pro ("Elan marker input").
+#[cfg(not(feature = "rm2"))]
 const DIGI_MAX_X: i32 = 11180;
+#[cfg(not(feature = "rm2"))]
 const DIGI_MAX_Y: i32 = 15340;
+
+// Digitizer axis ranges on the rM2 ("Wacom I2C Digitizer"). The digitizer is
+// mounted rotated: raw X runs bottom-to-top along the screen's long axis,
+// raw Y runs along the short axis.
+#[cfg(feature = "rm2")]
+const DIGI_MAX_X: i32 = 20966;
+#[cfg(feature = "rm2")]
+const DIGI_MAX_Y: i32 = 15725;
+
 pub const MAX_PRESSURE: i32 = 4096;
 
 const EV_SYN: u16 = 0;
@@ -65,7 +77,7 @@ impl PenDevice {
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
-        let grab = unsafe { libc::ioctl(fd, EVIOCGRAB, 1i32) };
+        let grab = unsafe { libc::ioctl(fd, EVIOCGRAB as _, 1i32) };
         if grab != 0 {
             eprintln!("riddle: warning: EVIOCGRAB failed ({}) — xochitl will also see the pen", io::Error::last_os_error());
         }
@@ -89,17 +101,14 @@ impl PenDevice {
     /// that changed state.
     pub fn drain(&mut self) -> Vec<PenSample> {
         let mut out = Vec::new();
-        // input_event on 64-bit: struct timeval (16) + type u16 + code u16 + value i32.
-        let mut buf = [0u8; 24 * 64];
+        let mut buf = [0u8; evdev::EV_SIZE * 64];
         loop {
             let n = unsafe { libc::read(self.fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
             if n <= 0 {
                 break;
             }
-            for chunk in buf[..n as usize].chunks_exact(24) {
-                let etype = u16::from_le_bytes(chunk[16..18].try_into().unwrap());
-                let code = u16::from_le_bytes(chunk[18..20].try_into().unwrap());
-                let value = i32::from_le_bytes(chunk[20..24].try_into().unwrap());
+            for chunk in buf[..n as usize].chunks_exact(evdev::EV_SIZE) {
+                let (etype, code, value) = evdev::decode(chunk);
                 match (etype, code) {
                     (EV_ABS, ABS_X) => {
                         self.raw_x = value;
@@ -126,9 +135,10 @@ impl PenDevice {
                     (EV_SYN, SYN_REPORT) => {
                         if self.dirty {
                             self.dirty = false;
+                            let (x, y) = map_to_screen(self.raw_x, self.raw_y);
                             out.push(PenSample {
-                                x: self.raw_x * (SCREEN_W as i32 - 1) / DIGI_MAX_X,
-                                y: self.raw_y * (SCREEN_H as i32 - 1) / DIGI_MAX_Y,
+                                x,
+                                y,
                                 pressure: self.pressure,
                                 tool: self.tool,
                                 touching: self.touching,
@@ -146,17 +156,40 @@ impl PenDevice {
 impl Drop for PenDevice {
     fn drop(&mut self) {
         unsafe {
-            libc::ioctl(self.fd, EVIOCGRAB, 0i32);
+            libc::ioctl(self.fd, EVIOCGRAB as _, 0i32);
             libc::close(self.fd);
         }
     }
+}
+
+/// Raw digitizer -> screen coordinates.
+#[cfg(not(feature = "rm2"))]
+fn map_to_screen(raw_x: i32, raw_y: i32) -> (i32, i32) {
+    // Paper Pro: axes map straight through.
+    (
+        raw_x * (SCREEN_W as i32 - 1) / DIGI_MAX_X,
+        raw_y * (SCREEN_H as i32 - 1) / DIGI_MAX_Y,
+    )
+}
+
+/// Raw digitizer -> screen coordinates.
+#[cfg(feature = "rm2")]
+fn map_to_screen(raw_x: i32, raw_y: i32) -> (i32, i32) {
+    // rM2: digitizer origin bottom-left of the portrait screen (Rot270):
+    // screen X follows raw Y; screen Y is raw X inverted.
+    (
+        raw_y * (SCREEN_W as i32 - 1) / DIGI_MAX_Y,
+        (DIGI_MAX_X - raw_x) * (SCREEN_H as i32 - 1) / DIGI_MAX_X,
+    )
 }
 
 fn find_marker_device() -> io::Result<String> {
     for i in 0..8 {
         let name_path = format!("/sys/class/input/event{i}/device/name");
         if let Ok(name) = std::fs::read_to_string(&name_path) {
-            if name.to_lowercase().contains("marker") {
+            let name = name.to_lowercase();
+            // "Elan marker input" on the Paper Pro, "Wacom I2C Digitizer" on rM1/rM2.
+            if name.contains("marker") || name.contains("wacom") {
                 return Ok(format!("/dev/input/event{i}"));
             }
         }
