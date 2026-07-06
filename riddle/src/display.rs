@@ -2,8 +2,15 @@
 //! vendor engine, xochitl stopped). Selected at runtime: if QTFB_KEY is set
 //! we're an AppLoad app; otherwise we assume takeover.
 
+use crate::fb::{SCREEN_H, SCREEN_W};
 use crate::surface::{PixFmt, Surface};
 use std::io;
+
+// Both devices' native qtfb formats are RGB565; only geometry differs.
+#[cfg(not(feature = "rm2"))]
+const QTFB_FORMAT: u8 = crate::qtfb::FBFMT_RMPP_RGB565;
+#[cfg(feature = "rm2")]
+const QTFB_FORMAT: u8 = crate::qtfb::FBFMT_RM2FB;
 
 pub enum Display {
     Qtfb(crate::qtfb::QtfbClient),
@@ -31,15 +38,15 @@ impl Display {
             let key: i32 = key.parse().map_err(io::Error::other)?;
             let mut client = crate::qtfb::QtfbClient::connect(
                 key,
-                crate::qtfb::FBFMT_RMPP_RGB565,
-                1620,
-                2160,
+                QTFB_FORMAT,
+                SCREEN_W,
+                SCREEN_H,
                 2,
             )?;
             let _ = client.set_refresh_mode(crate::qtfb::REFRESH_MODE_UFAST);
             let buf = client.framebuffer();
             let (ptr, len) = (buf.as_mut_ptr(), buf.len());
-            let surface = Surface::new(ptr, len, 1620, 2160, 1620 * 2, PixFmt::Rgb565);
+            let surface = Surface::new(ptr, len, SCREEN_W, SCREEN_H, SCREEN_W * 2, PixFmt::Rgb565);
             return Ok((Display::Qtfb(client), surface));
         }
 

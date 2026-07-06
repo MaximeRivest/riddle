@@ -7,7 +7,11 @@
 //! QTFB_KEY is set, or full takeover via the vendor engine (quill) when
 //! built with --features takeover and launched with xochitl stopped.
 
+#[cfg(all(feature = "rm2", feature = "takeover"))]
+compile_error!("takeover mode drives the Paper Pro's vendor engine; build rm2 without --features takeover");
+
 mod display;
+mod evdev;
 mod fb;
 mod help;
 mod ink;

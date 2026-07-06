@@ -19,7 +19,11 @@ pub const MESSAGE_REQUEST_FULL_REFRESH: u8 = 6;
 pub const UPDATE_ALL: i32 = 0;
 pub const UPDATE_PARTIAL: i32 = 1;
 
+/// FBFMT_RM2FB: native 1404x1872, 2 bytes/pixel (RGB565), stride = 2808.
+#[allow(dead_code)]
+pub const FBFMT_RM2FB: u8 = 0;
 /// FBFMT_RMPP_RGB565: native 1620x2160, 2 bytes/pixel, stride = 3240.
+#[allow(dead_code)]
 pub const FBFMT_RMPP_RGB565: u8 = 3;
 
 #[allow(dead_code)]

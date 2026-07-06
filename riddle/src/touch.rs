@@ -3,6 +3,8 @@
 use std::io;
 use std::os::fd::RawFd;
 
+use crate::evdev;
+
 const EV_ABS: u16 = 3;
 const ABS_MT_SLOT: u16 = 47;
 const ABS_MT_TRACKING_ID: u16 = 57;
@@ -20,7 +22,9 @@ impl TouchDevice {
         for i in 0..8 {
             let name_path = format!("/sys/class/input/event{i}/device/name");
             if let Ok(name) = std::fs::read_to_string(&name_path) {
-                if name.to_lowercase().contains("touch") {
+                let name = name.to_lowercase();
+                // "touch" on the Paper Pro; "pt_mt"/"cyttsp5_mt" on rM2/rM1.
+                if name.contains("touch") || name.contains("pt_mt") || name.contains("cyttsp5") {
                     let path = std::ffi::CString::new(format!("/dev/input/event{i}")).unwrap();
                     let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK) };
                     if fd < 0 {
@@ -37,16 +41,14 @@ impl TouchDevice {
     /// Returns true if a 5-finger touch was seen.
     pub fn drain_check_quit(&mut self) -> bool {
         let mut quit = false;
-        let mut buf = [0u8; 24 * 64];
+        let mut buf = [0u8; evdev::EV_SIZE * 64];
         loop {
             let n = unsafe { libc::read(self.fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
             if n <= 0 {
                 break;
             }
-            for chunk in buf[..n as usize].chunks_exact(24) {
-                let etype = u16::from_le_bytes(chunk[16..18].try_into().unwrap());
-                let code = u16::from_le_bytes(chunk[18..20].try_into().unwrap());
-                let value = i32::from_le_bytes(chunk[20..24].try_into().unwrap());
+            for chunk in buf[..n as usize].chunks_exact(evdev::EV_SIZE) {
+                let (etype, code, value) = evdev::decode(chunk);
                 if etype == EV_ABS && code == ABS_MT_SLOT {
                     self.cur = (value.max(0) as usize).min(MAX_SLOTS - 1);
                 } else if etype == EV_ABS && code == ABS_MT_TRACKING_ID {

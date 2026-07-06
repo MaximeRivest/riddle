@@ -147,6 +147,21 @@ xochitl, runs the diary, and **always restores xochitl on exit** — exit with
 the power button, a 5-finger tap, or SIGTERM. If anything wedges:
 `ssh root@10.11.99.1 'systemctl start xochitl'`.
 
+### reMarkable 2 (windowed only)
+
+The rM2 build targets 32-bit ARM and the rM2's 1404×1872 panel, and runs in
+windowed (AppLoad/qtfb) mode only — the takeover engine is Paper Pro-specific.
+Requires [xovi + AppLoad](https://github.com/asivery/rm-appload) on the device.
+
+```sh
+rustup target add armv7-unknown-linux-musleabihf
+cd riddle && ./build-rm2.sh     # needs cargo-zigbuild + zig; emits dist/rm2/riddle/
+scp -O -r dist/rm2/riddle root@10.11.99.1:/home/root/xovi/exthome/appload/
+```
+
+Then add your key in `oracle.env` as above, Reload in AppLoad, and open
+**The Diary**. Tested on reMarkable 2, OS 3.x.
+
 ## Fonts
 
 The reply hand is [Dancing Script](https://github.com/googlefonts/DancingScript)
