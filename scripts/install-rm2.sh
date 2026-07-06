@@ -30,9 +30,14 @@ BUNDLE="$HERE/dist/rm2/riddle"
 say()  { printf '\033[1m== %s\033[0m\n' "$*"; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 
-# The rM2's SSH server only offers legacy ssh-rsa; modern OpenSSH clients
-# refuse it by default ("no matching host key type found. Their offer: ssh-rsa").
-SSH_OPTS=(-o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa)
+# rM2 SSH quirks, seen in the wild:
+#  - dropbear 2020.81 (OS 3.x) closes the connection if an RSA host key is
+#    negotiated (broken RSA signing path) — so prefer ed25519 explicitly. A
+#    stale ssh-rsa entry for 10.11.99.1 in known_hosts forces RSA and triggers
+#    exactly this; clear it with: ssh-keygen -R 10.11.99.1
+#  - older firmware offers only ssh-rsa, which modern clients refuse by
+#    default — so keep ssh-rsa as an accepted fallback.
+SSH_OPTS=(-o HostKeyAlgorithms=ssh-ed25519,ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa)
 rm_ssh() { ssh "${SSH_OPTS[@]}" "root@$RM_HOST" "$@"; }
 rm_scp() { scp -O "${SSH_OPTS[@]}" "$@"; }
 

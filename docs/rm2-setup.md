@@ -33,17 +33,27 @@ Then on the tablet: open **AppLoad → The Diary**, write, rest the pen ~3 s.
 > updates can remove xovi/AppLoad/riddle — reinstallable by re-running the
 > installer. Keep the SSH password: it is your escape hatch.
 
-### If SSH says `Their offer: ssh-rsa`
+### If SSH won't connect
 
-The rM2's SSH server only speaks the legacy `ssh-rsa` algorithm, which modern
-OpenSSH clients refuse by default. The installer handles this for its own
-connections; for your own `ssh`/`scp` sessions, add to `~/.ssh/config`:
+Two rM2 SSH quirks, both handled by the installer for its own connections.
+For your own `ssh`/`scp` sessions:
+
+- **`Connection closed by 10.11.99.1 port 22`** — the rM2's dropbear (OS 3.x)
+  has a broken RSA host-key path: it hangs up whenever RSA is negotiated,
+  though ed25519 works fine. A stale `ssh-rsa` entry for `10.11.99.1` in your
+  `~/.ssh/known_hosts` (from an older device or firmware) forces your client
+  to request RSA and triggers exactly this. Fix:
+  `ssh-keygen -R 10.11.99.1`, then connect again.
+- **`no matching host key type found. Their offer: ssh-rsa`** — older firmware
+  offers only legacy `ssh-rsa`, which modern OpenSSH refuses by default.
+
+This `~/.ssh/config` block covers both:
 
 ```
 Host remarkable rm2 10.11.99.1
   HostName 10.11.99.1
   User root
-  HostKeyAlgorithms +ssh-rsa
+  HostKeyAlgorithms ssh-ed25519,ssh-rsa
   PubkeyAcceptedAlgorithms +ssh-rsa
 ```
 
