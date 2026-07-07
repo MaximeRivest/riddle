@@ -50,6 +50,13 @@
         "on"
       ],
       "help": "Stamp Tom's little footprints beside your ink while writing. Leave empty for off."
+    },
+    {
+      "key": "RIDDLE_HISTORY_TURNS",
+      "label": "Memory (turns)",
+      "kind": "text",
+      "placeholder": "6",
+      "help": "Past turns the diary remembers within a session. Each re-sends its page image (token cost). 0 = no memory."
     }
   ],
   "presets": [

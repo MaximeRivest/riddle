@@ -230,6 +230,11 @@ pub struct HttpOracle {
     model: String,
     max_tokens: u32,
     reasoning: Option<String>, // "reasoning_effort" value, e.g. "low"
+    /// Completed turns as (page image b64, reply text), oldest first — sent
+    /// as chat history so the diary remembers the conversation. In-memory
+    /// only: closing the diary wipes its memory, which suits the fiction.
+    history: Arc<Mutex<Vec<(String, String)>>>,
+    history_turns: usize,
 }
 
 impl HttpOracle {
@@ -260,11 +265,26 @@ impl HttpOracle {
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
+        // How many past turns the diary remembers within a session. Each
+        // remembered turn re-sends its page image, so this is the main
+        // vision-token cost knob. 0 = the old stateless behavior.
+        let history_turns = std::env::var("RIDDLE_HISTORY_TURNS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(6);
         eprintln!(
-            "riddle: http oracle base={base} model={model} max_tokens={max_tokens} reasoning={}",
+            "riddle: http oracle base={base} model={model} max_tokens={max_tokens} reasoning={} history={history_turns}",
             reasoning.as_deref().unwrap_or("-")
         );
-        Ok(Self { base, key, model, max_tokens, reasoning })
+        Ok(Self {
+            base,
+            key,
+            model,
+            max_tokens,
+            reasoning,
+            history: Arc::new(Mutex::new(Vec::new())),
+            history_turns,
+        })
     }
 
     pub fn ask(&self, png_path: &str, tx: Sender<Result<String, String>>) {
@@ -282,28 +302,47 @@ impl HttpOracle {
             .as_deref()
             .map(|r| format!("\"reasoning_effort\":{},", json_quote(r)))
             .unwrap_or_default();
+        let history = Arc::clone(&self.history);
+        let history_turns = self.history_turns;
 
         thread::spawn(move || {
-            // OpenAI chat-completions with a data-URI image part, streaming.
+            // One user turn: the standing prompt plus a page image.
+            let user_turn = |image: &str| {
+                format!(
+                    concat!(
+                        "{{\"role\":\"user\",\"content\":[",
+                        "{{\"type\":\"text\",\"text\":{}}},",
+                        "{{\"type\":\"image_url\",\"image_url\":{{\"url\":\"data:image/png;base64,{}\"}}}}",
+                        "]}}"
+                    ),
+                    json_quote("Reply to what is written in the diary."),
+                    image,
+                )
+            };
+
+            // Past turns give the diary its memory within a session: each is
+            // replayed as the page image the writer showed plus the reply.
+            let mut messages = format!("{{\"role\":\"system\",\"content\":{}}}", json_quote(PERSONA));
+            if history_turns > 0 {
+                for (h_img, h_reply) in history.lock().unwrap().iter() {
+                    messages.push(',');
+                    messages.push_str(&user_turn(h_img));
+                    messages.push_str(&format!(",{{\"role\":\"assistant\",\"content\":{}}}", json_quote(h_reply)));
+                }
+            }
+            messages.push(',');
+            messages.push_str(&user_turn(&img));
+
+            // OpenAI chat-completions with data-URI image parts, streaming.
             // The cap is sent as "max_completion_tokens": reasoning models
             // (gpt-5.x, o-series) reject the legacy "max_tokens" outright,
             // and every current OpenAI model accepts the new field.
             let body = format!(
-                concat!(
-                    "{{\"model\":{},\"stream\":true,\"max_completion_tokens\":{},{}",
-                    "\"messages\":[",
-                    "{{\"role\":\"system\",\"content\":{}}},",
-                    "{{\"role\":\"user\",\"content\":[",
-                    "{{\"type\":\"text\",\"text\":{}}},",
-                    "{{\"type\":\"image_url\",\"image_url\":{{\"url\":\"data:image/png;base64,{}\"}}}}",
-                    "]}}]}}"
-                ),
+                "{{\"model\":{},\"stream\":true,\"max_completion_tokens\":{},{}\"messages\":[{}]}}",
                 json_quote(&model),
                 max_tokens,
                 reasoning_field,
-                json_quote(PERSONA),
-                json_quote("Reply to what is written in the diary."),
-                img,
+                messages,
             );
 
             let asked = std::time::Instant::now();
@@ -363,6 +402,14 @@ impl HttpOracle {
             }
             if delivered == 0 {
                 let _ = tx.send(Err("empty reply".into()));
+            } else if history_turns > 0 {
+                // Successful turn: remember it (oldest turns fall off).
+                let mut h = history.lock().unwrap();
+                h.push((img, clean(&acc)));
+                let extra = h.len().saturating_sub(history_turns);
+                if extra > 0 {
+                    h.drain(..extra);
+                }
             }
             // tx drops here → the diary's receiver disconnects = reply complete.
         });
