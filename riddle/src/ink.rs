@@ -69,6 +69,11 @@ impl Ink {
 
     /// Remove committed stroke points within `r` of (x, y); split strokes that
     /// are erased through the middle, and recompute the ink bbox.
+    ///
+    /// Adjacency is also broken when the SEGMENT between two surviving points
+    /// passes through the eraser: fast strokes store sparse points, so an
+    /// eraser can whiten the brushed line between two points without touching
+    /// either — replaying that line would resurrect visually erased ink.
     fn forget_near(&mut self, x: i32, y: i32, r: i32) {
         let r2 = (r + 2) * (r + 2);
         let mut kept: Vec<Vec<(i32, i32, i32)>> = Vec::new();
@@ -81,6 +86,11 @@ impl Ink {
                         kept.push(std::mem::take(&mut seg));
                     }
                 } else {
+                    if let Some(&prev) = seg.last() {
+                        if segment_near(prev.0, prev.1, p.0, p.1, x, y, r + 2) {
+                            kept.push(std::mem::take(&mut seg));
+                        }
+                    }
                     seg.push(p);
                 }
             }
@@ -203,6 +213,16 @@ fn brush_g(page: &mut [u8], w: usize, h: usize, x0: i32, y0: i32, x1: i32, y1: i
     }
 }
 
+/// Does the segment A->B pass within `r` of point (x, y)?
+fn segment_near(ax: i32, ay: i32, bx: i32, by: i32, x: i32, y: i32, r: i32) -> bool {
+    let (abx, aby) = ((bx - ax) as f32, (by - ay) as f32);
+    let (apx, apy) = ((x - ax) as f32, (y - ay) as f32);
+    let len2 = abx * abx + aby * aby;
+    let t = if len2 <= f32::EPSILON { 0.0 } else { ((apx * abx + apy * aby) / len2).clamp(0.0, 1.0) };
+    let (cx, cy) = (apx - t * abx, apy - t * aby);
+    cx * cx + cy * cy <= (r * r) as f32
+}
+
 /// Deterministic per-pixel hash for the dissolve pattern.
 #[inline]
 fn px_hash(x: i32, y: i32) -> u32 {
@@ -300,6 +320,25 @@ mod tests {
         let (sx, sy) = ((110 - (bx - 20)) as usize / f, (100 - (by - 20)) as usize / f);
         assert!(img[sy * w + sx] < 60, "the writer's ink is missing from the snapshot");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn erasing_between_sparse_points_splits_the_stroke() {
+        let (_buf, mut s) = surf();
+        let mut ink = Ink::new();
+        // A sparse stroke: two points 80px apart (a fast pen).
+        ink.pen_point(&mut s, 60, 100, 3);
+        ink.pen_point(&mut s, 140, 100, 3);
+        ink.pen_up();
+        assert_eq!(ink.stroke_list().len(), 1);
+        // Erase midway: neither point center is inside the eraser, but the
+        // brushed line between them is.
+        ink.erase_point(&mut s, 100, 100, 15);
+        assert_eq!(
+            ink.stroke_list().len(),
+            2,
+            "segment through the eraser must break adjacency"
+        );
     }
 
     #[test]

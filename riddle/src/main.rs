@@ -431,12 +431,33 @@ fn run() -> std::io::Result<()> {
         // ---- state machine ----
         state = match state {
             State::Listening { last_pen } => match last_pen {
+                // The touch that kept a lingering reply led to no ink at all
+                // (an eraser tap, or contact without a stroke): give the
+                // reply its fade back, or it would sit on the page forever.
+                Some(t)
+                    if !pen_down
+                        && t.elapsed() >= IDLE_COMMIT
+                        && user_ink.is_empty()
+                        && !pending_reply.is_empty() =>
+                {
+                    let region = pending_reply;
+                    pending_reply = BBox::empty();
+                    State::FadingReply { stage: 0, next: Instant::now(), region }
+                }
                 Some(t) if !pen_down && t.elapsed() >= IDLE_COMMIT && !user_ink.is_empty() => {
                     if region_all_white(&surf, user_ink.bbox) {
                         // Everything was erased before the pause: nothing to
                         // commit (and no phantom "?" from erased strokes).
                         user_ink.clear();
-                        State::Listening { last_pen: None }
+                        if pending_reply.is_empty() {
+                            State::Listening { last_pen: None }
+                        } else {
+                            // …but the lingering reply the writer touched
+                            // still needs its fade.
+                            let region = pending_reply;
+                            pending_reply = BBox::empty();
+                            State::FadingReply { stage: 0, next: Instant::now(), region }
+                        }
                     } else if help::looks_like_question_mark(user_ink.stroke_list()) {
                         // Absorb the "?" and open the guide instead of asking.
                         let (qx, qy, qw, qh) = user_ink.bbox.rect();
