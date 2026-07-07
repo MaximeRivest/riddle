@@ -524,12 +524,13 @@ fn run() -> std::io::Result<()> {
                         }
                         Ok(Event::Draw(sketch)) => {
                             // The reply leads with a sketch: draw it, and keep
-                            // the receiver for whatever prose follows.
+                            // the receiver for whatever prose follows. The
+                            // block itself is kept in the reply record, so
+                            // later turns (and a continued game) can see
+                            // exactly what was drawn.
                             match plan_drawing(&sketch, None) {
                                 Some(plan) => {
-                                    if turn_reply.is_empty() {
-                                        turn_reply.push_str("(the diary drew)");
-                                    }
+                                    turn_reply.push_str(&draw::serialize(&sketch));
                                     State::Replying { plan, next: Instant::now(), rx: Some(rx) }
                                 }
                                 None => State::Thinking { rx, pulse, blot_on, since },
@@ -598,8 +599,14 @@ fn run() -> std::io::Result<()> {
                         }
                         Ok(Ok(Event::Draw(sketch))) => {
                             // A sketch mid-reply: splice it in below the prose
-                            // written so far, like any other streamed chunk.
-                            append_drawing(&mut plan, &sketch);
+                            // written so far, and keep the block in the reply
+                            // record (only if it was actually drawn).
+                            if append_drawing(&mut plan, &sketch).is_some() {
+                                if !turn_reply.is_empty() {
+                                    turn_reply.push(' ');
+                                }
+                                turn_reply.push_str(&draw::serialize(&sketch));
+                            }
                             false
                         }
                         Ok(Ok(Event::Show(_))) => {
@@ -868,11 +875,30 @@ fn conjure(
         all.push(stroke.clone());
     }
 
-    // Tom's old reply, below.
-    if !entry.reply.is_empty() {
+    // Tom's old reply, below. Stored replies may carry ⟦draw:…⟧ blocks (kept
+    // for the oracle's benefit); the raw coordinates are never written out —
+    // the remembered page shows the words, and any sketch is redrawn from them.
+    let reply_text = draw::strip_blocks(&entry.reply);
+    let mut reply_bottom = ink_bottom;
+    if !reply_text.is_empty() {
         let y = (ink_bottom + 130).min(SCREEN_H as i32 - 400);
-        let reply = plan_reply(font, &entry.reply, Some(y));
+        let reply = plan_reply(font, &reply_text, Some(y));
         for stroke in reply.strokes {
+            let mapped: Vec<(i32, i32, i32)> = stroke.iter().map(|&(x, y)| (x, y, 2)).collect();
+            for &(x, y, r) in &mapped {
+                region.add(x, y, r + 2);
+                reply_bottom = reply_bottom.max(y);
+            }
+            all.push(mapped);
+        }
+    }
+
+    // …and the sketches it carried, rising through the paper like the words.
+    for sketch in draw::blocks(&entry.reply) {
+        let y = (reply_bottom + 110).min(SCREEN_H as i32 - 400);
+        let Some(plan) = plan_drawing(&sketch, Some(y)) else { continue };
+        reply_bottom = plan.next_y - 80;
+        for stroke in plan.strokes {
             let mapped: Vec<(i32, i32, i32)> = stroke.iter().map(|&(x, y)| (x, y, 2)).collect();
             for &(x, y, r) in &mapped {
                 region.add(x, y, r + 2);
@@ -938,16 +964,18 @@ fn plan_drawing(sketch: &draw::Sketch, y_start: Option<i32>) -> Option<WritePlan
 }
 
 /// Splice a streamed sketch into a running write animation, below the prose
-/// written so far. Skipped (with a log) when the page has no room left.
-fn append_drawing(plan: &mut WritePlan, sketch: &draw::Sketch) {
+/// written so far. Returns the placed screen strokes, or None (with a log)
+/// when the page has no room left.
+fn append_drawing(plan: &mut WritePlan, sketch: &draw::Sketch) -> Option<Vec<Vec<(i32, i32)>>> {
     let Some(cont) = plan_drawing(sketch, Some(plan.next_y + 30)) else {
         eprintln!("riddle: no room left on the page for the sketch");
-        return;
+        return None;
     };
     plan.region.add(cont.region.x0, cont.region.y0, 0);
     plan.region.add(cont.region.x1, cont.region.y1, 0);
-    plan.strokes.extend(cont.strokes);
+    plan.strokes.extend(cont.strokes.iter().cloned());
     plan.next_y = cont.next_y;
+    Some(cont.strokes)
 }
 
 /// Splice a streamed continuation chunk into a running write animation.

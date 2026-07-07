@@ -162,6 +162,56 @@ fn wobble_stroke(
     out
 }
 
+/// Serialize a sketch back into its ⟦draw:…⟧ block — the language the model
+/// itself speaks. Stored with the reply text so later turns can see exactly
+/// what was drawn (a game board, say) and add to it instead of starting over.
+pub fn serialize(sketch: &Sketch) -> String {
+    let strokes: Vec<String> = sketch
+        .iter()
+        .map(|s| s.iter().map(|&(x, y)| format!("{x:.0},{y:.0}")).collect::<Vec<_>>().join(" "))
+        .collect();
+    format!("\u{27e6}draw:{}\u{27e7}", strokes.join("; "))
+}
+
+/// Extract every parseable ⟦draw:…⟧ block from stored reply text — the
+/// sketches a remembered page carries, ready to be redrawn.
+pub fn blocks(s: &str) -> Vec<Sketch> {
+    let mut out = Vec::new();
+    let mut rest = s;
+    while let Some(open) = rest.find('\u{27e6}') {
+        rest = &rest[open + '\u{27e6}'.len_utf8()..];
+        let Some(close) = rest.find('\u{27e7}') else { break };
+        if let Some(sketch) = parse(&rest[..close]) {
+            out.push(sketch);
+        }
+        rest = &rest[close + '\u{27e7}'.len_utf8()..];
+    }
+    out
+}
+
+/// Remove ⟦…⟧ blocks from stored reply text, for the moments the diary must
+/// speak a remembered reply aloud (conjuring): raw coordinates must never be
+/// written out in ink. An unterminated block drops the tail.
+pub fn strip_blocks(s: &str) -> String {
+    if !s.contains('\u{27e6}') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(open) = rest.find('\u{27e6}') {
+        out.push_str(&rest[..open]);
+        match rest[open..].find('\u{27e7}') {
+            Some(close) => rest = &rest[open + close + '\u{27e7}'.len_utf8()..],
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// A deterministic per-sketch seed: the same drawing always wobbles the same.
 pub fn sketch_seed(sketch: &Sketch) -> u32 {
     sketch
@@ -248,6 +298,33 @@ mod tests {
         let y_top = SCREEN_H as i32 - 140 - 300; // exactly 300px of room
         let (_, bottom) = place(&sketch, y_top, 7).unwrap();
         assert!(bottom <= FLOOR + 4, "bottom {bottom} spills past the page");
+    }
+
+    #[test]
+    fn serialize_round_trips_through_parse() {
+        let sketch: Sketch = vec![vec![(10.0, 20.0), (30.0, 40.0)], vec![(50.0, 50.0)]];
+        let block = serialize(&sketch);
+        let inner = &block[3..block.len() - 3]; // strip the ⟦ ⟧ glyphs
+        assert_eq!(parse(inner), Some(sketch.clone()));
+        // The full block form is what the model sees in its own history.
+        assert_eq!(serialize(&sketch), "\u{27e6}draw:10,20 30,40; 50,50\u{27e7}");
+    }
+
+    #[test]
+    fn strip_blocks_removes_spans_and_tails() {
+        assert_eq!(strip_blocks("a \u{27e6}draw:1,1 2,2\u{27e7} b"), "a b");
+        assert_eq!(strip_blocks("plain text"), "plain text");
+        assert_eq!(strip_blocks("tail \u{27e6}draw:1,1"), "tail");
+    }
+
+    #[test]
+    fn blocks_extracts_only_parseable_sketches() {
+        let s = "See. \u{27e6}draw:1,1 2,2\u{27e7} and \u{27e6}show:3\u{27e7} \u{27e6}draw:5,5\u{27e7}";
+        let b = blocks(s);
+        assert_eq!(b.len(), 2);
+        assert_eq!(b[0], vec![vec![(1.0, 1.0), (2.0, 2.0)]]);
+        assert_eq!(b[1], vec![vec![(5.0, 5.0)]]);
+        assert!(blocks("no blocks here").is_empty());
     }
 
     #[test]
