@@ -433,9 +433,7 @@ fn run() -> std::io::Result<()> {
                 if dx * dx + dy * dy > 20 * 20 {
                     // Drifted: this is erasing, not stabbing.
                     if let Some(bl) = bleed.take() {
-                        if !bl.bbox.is_empty() {
-                            absorb_region(&mut surf, &disp, bl.bbox);
-                        }
+                        bleed_absorb(&mut surf, &disp, &bl);
                     }
                     stab = Some((x, y, Instant::now()));
                 } else {
@@ -447,6 +445,8 @@ fn run() -> std::io::Result<()> {
                         let mut bl = bleed
                             .take()
                             .unwrap_or_else(|| bleed_new(&surf, sx, sy, splat_seed(sx, sy)));
+                        // No abort past this point — the undo log can go.
+                        bl.painted = Vec::new();
                         let (w, h) = (surf.w as i32, surf.h as i32);
                         let corners = [(0i32, 0i32), (w - 1, 0), (0, h - 1), (w - 1, h - 1)];
                         // Ease into the rush: the creep leans forward over
@@ -459,7 +459,7 @@ fn run() -> std::io::Result<()> {
                             let add = (2 + frame).min(14) as f32;
                             let nr = (bl.r * mult + add).min(6000.0);
                             frame += 1;
-                            bleed_grow(&mut surf, &mut bl, nr);
+                            bleed_grow(&mut surf, &mut bl, nr, false);
                             disp.update(0, 0, w, h, true);
                             let drowned = corners.iter().all(|&(qx, qy)| {
                                 let (cdx, cdy) = ((qx - bl.ox) as i64, (qy - bl.oy) as i64);
@@ -496,7 +496,7 @@ fn run() -> std::io::Result<()> {
                         let bl = bleed.as_mut().unwrap();
                         let target = 8.0 + (held.as_millis() as f32 - 800.0) / 2200.0 * 110.0;
                         if target >= bl.r + 2.0 {
-                            bleed_grow(&mut surf, bl, target);
+                            bleed_grow(&mut surf, bl, target, true);
                             let (bx, by, bw, bh) = bl.bbox.rect();
                             disp.update(bx, by, bw, bh, true);
                         }
@@ -508,9 +508,7 @@ fn run() -> std::io::Result<()> {
                 // bleed. Anything under it goes too — an eraser was pressed
                 // there, after all.
                 if let Some(bl) = bleed.take() {
-                    if !bl.bbox.is_empty() {
-                        absorb_region(&mut surf, &disp, bl.bbox);
-                    }
+                    bleed_absorb(&mut surf, &disp, &bl);
                 }
                 stab = None;
             }
@@ -917,6 +915,10 @@ struct Bleed {
     r: f32,
     bbox: BBox,
     seed: u32,
+    /// Pixels the bleed itself blackened (they were white before), pooling
+    /// only. An abort restores exactly these — handwriting beneath the pool
+    /// was already dark, never enters this list, and so survives untouched.
+    painted: Vec<(u16, u16)>,
 }
 
 const BLEED_CELL: i32 = 4;
@@ -948,14 +950,14 @@ fn bleed_new(surf: &Surface, ox: i32, oy: i32, seed: u32) -> Bleed {
             field[(y * fw + x) as usize] = ((0.55 + n) * 64.0) as u8;
         }
     }
-    Bleed { ox, oy, field, fw, r: 0.0, bbox: BBox::empty(), seed }
+    Bleed { ox, oy, field, fw, r: 0.0, bbox: BBox::empty(), seed, painted: Vec::new() }
 }
 
 /// Grow the bleed to nominal radius `new_r`: ink every newly claimed pixel
 /// (d² · 4096 ≤ R² · g², integer-only per pixel), plus the spatter droplets
 /// whose appearance thresholds R just crossed — flung ink landing ahead of
 /// the front, swallowed by it later.
-fn bleed_grow(surf: &mut Surface, b: &mut Bleed, new_r: f32) {
+fn bleed_grow(surf: &mut Surface, b: &mut Bleed, new_r: f32, record: bool) {
     let old_r = b.r;
     if new_r <= old_r {
         return;
@@ -978,6 +980,9 @@ fn bleed_grow(surf: &mut Surface, b: &mut Bleed, new_r: f32) {
             let g2 = g * g;
             let lhs = d2 * 4096;
             if lhs <= r2 * g2 && lhs > old2 * g2 {
+                if record && surf.luma(x, y) >= 128 {
+                    b.painted.push((x as u16, y as u16));
+                }
                 surf.put_px(x, y, BLACK);
                 b.bbox.add(x, y, 1);
             }
@@ -994,17 +999,41 @@ fn bleed_grow(surf: &mut Surface, b: &mut Bleed, new_r: f32) {
         let rr = 2 + ((hh >> 27) % 6) as i32;
         let (px, py) = (b.ox + (dist * ang.cos()) as i32, b.oy + (dist * ang.sin()) as i32);
         if px > -20 && py > -20 && px < w + 20 && py < h + 20 {
-            surf.stamp(px, py, rr, BLACK);
+            for oy in -rr..=rr {
+                for ox in -rr..=rr {
+                    if ox * ox + oy * oy > rr * rr {
+                        continue;
+                    }
+                    let (qx, qy) = (px + ox, py + oy);
+                    if qx < 0 || qy < 0 || qx >= w || qy >= h {
+                        continue;
+                    }
+                    if record && surf.luma(qx, qy) >= 128 {
+                        b.painted.push((qx as u16, qy as u16));
+                    }
+                    surf.put_px(qx, qy, BLACK);
+                }
+            }
             b.bbox.add(px, py, rr + 1);
         }
     }
 }
 
-/// Reabsorb warning ink after an aborted stab: dissolve the region in place.
-fn absorb_region(surf: &mut Surface, disp: &display::Display, region: BBox) {
-    for stage in 0..8 {
-        ink::dissolve_pass(surf, region, stage, 8);
-        let (x, y, w, h) = region.rect();
+/// Reabsorb an aborted bleed: restore exactly the pixels the bleed itself
+/// blackened, in the same staggered pattern as the drink dissolve. Ink that
+/// was already on the page (handwriting under the pool) was never recorded
+/// and is left untouched, keeping the screen true to the stroke model.
+fn bleed_absorb(surf: &mut Surface, disp: &display::Display, bl: &Bleed) {
+    if bl.painted.is_empty() {
+        return;
+    }
+    for stage in 0..8u32 {
+        for &(x, y) in &bl.painted {
+            if splat_seed(x as i32, y as i32) % 8 <= stage {
+                surf.put_px(x as i32, y as i32, WHITE);
+            }
+        }
+        let (x, y, w, h) = bl.bbox.rect();
         disp.update(x, y, w, h, true);
         std::thread::sleep(Duration::from_millis(45));
     }
