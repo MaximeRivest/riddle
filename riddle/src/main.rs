@@ -449,8 +449,14 @@ fn run() -> std::io::Result<()> {
                             .unwrap_or_else(|| bleed_new(&surf, sx, sy, splat_seed(sx, sy)));
                         let (w, h) = (surf.w as i32, surf.h as i32);
                         let corners = [(0i32, 0i32), (w - 1, 0), (0, h - 1), (w - 1, h - 1)];
+                        // Ease into the rush: the creep leans forward over
+                        // the first ~0.7s instead of snapping to full speed.
+                        let mut frame = 0i32;
                         loop {
-                            let nr = (bl.r * 1.32 + 14.0).min(6000.0);
+                            let mult = 1.0 + (0.04 * frame as f32).min(0.30);
+                            let add = (3 + frame * 2).min(20) as f32;
+                            let nr = (bl.r * mult + add).min(6000.0);
+                            frame += 1;
                             bleed_grow(&mut surf, &mut bl, nr);
                             disp.update(0, 0, w, h, true);
                             let drowned = corners.iter().all(|&(qx, qy)| {
