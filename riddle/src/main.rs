@@ -439,36 +439,14 @@ fn run() -> std::io::Result<()> {
                 } else {
                     let held = t0.elapsed();
                     if held >= Duration::from_secs(3) {
-                        // The fang lands. One continuous motion, no cuts:
-                        // the pooled splat SURGES — same seed, same shape,
-                        // growing frame by frame with fresh spatter landing —
-                        // then accelerates into the flood, whose wavefront
-                        // keeps the wobble (plus finger lobes) so the page is
-                        // swallowed by a stain, never a circle.
+                        // The fang lands. The pooled splat is not replaced or
+                        // scaled — its own ink becomes the seed of a paper-
+                        // absorption cellular automaton and SOAKS outward:
+                        // the front advances cell by cell, fast through
+                        // high-absorbency fibres (fingers), slow elsewhere
+                        // (bays), accelerating until the page drowns.
                         eprintln!("riddle: basilisk fang — the diary's memory is erased");
-                        let seed = splat_seed(sx, sy);
-                        let mut r = stab_pool.max(10);
-                        while r < 300 {
-                            r = (r + 22).min(300);
-                            let b = draw_splat(&mut surf, sx, sy, r, seed);
-                            let (bx, by, bw, bh) = b.rect();
-                            disp.update(bx, by, bw, bh, true);
-                            std::thread::sleep(Duration::from_millis(45));
-                        }
-                        let (w, h) = (surf.w as i32, surf.h as i32);
-                        // The wobble can pull the wavefront in to ~0.56×r, so
-                        // overshoot the corner distance to be sure the final
-                        // step swallows the whole page.
-                        let maxr = {
-                            let fx = sx.max(w - sx);
-                            let fy = sy.max(h - sy);
-                            ((((fx * fx + fy * fy) as f64).sqrt() * 2.3) as i32) + 2
-                        };
-                        for step in 1..=8 {
-                            flood_splat(&mut surf, sx, sy, 300 + (maxr - 300) * step / 8, seed);
-                            disp.update(0, 0, w, h, true);
-                            std::thread::sleep(Duration::from_millis(110));
-                        }
+                        flood_soak(&mut surf, &disp, stab_bbox);
                         std::thread::sleep(Duration::from_millis(500));
                         if let Some(ref mut s) = store {
                             s.forget_all();
@@ -927,12 +905,10 @@ fn draw_splat(surf: &mut Surface, cx: i32, cy: i32, r: i32, seed: u32) -> BBox {
     }
 
     // Satellite droplets: fixed absolute positions derived from their own
-    // appearance threshold, so already-drawn droplets never move. Thresholds
-    // run past the pooling range (≤110) so fresh spatter keeps landing
-    // through the death surge instead of the growth going bald.
-    for i in 0..48u32 {
+    // appearance threshold, so already-drawn droplets never move.
+    for i in 0..26u32 {
         let h = splat_hash(seed, i);
-        let threshold = 12 + (h % 280) as i32; // r at which this droplet lands
+        let threshold = 12 + (h % 99) as i32; // r at which this droplet lands
         if r < threshold {
             continue;
         }
@@ -966,45 +942,141 @@ fn absorb_region(surf: &mut Surface, disp: &display::Display, region: BBox) {
     }
 }
 
-/// One expanding pass of the stab flood. The wavefront wobbles with the same
-/// seeded lobes as the splat, so the ink spreads as a growing stain rather
-/// than a circle. Row-span fill (two trig evaluations per row) keeps a
-/// page-sized flood cheap.
-fn flood_splat(surf: &mut Surface, cx: i32, cy: i32, r: i32, seed: u32) {
-    let p1 = (seed % 6283) as f32 / 1000.0;
-    let p2 = ((seed >> 10) % 6283) as f32 / 1000.0;
-    let p3 = ((seed >> 20) % 6283) as f32 / 1000.0;
-    // The splat's own lobes plus two higher-frequency ones: at page-scale
-    // radii the slow lobes read as smooth arcs, so the fast ones keep the
-    // front ragged — ink reaching out in fingers, never a circle.
-    let wobble = |th: f32| {
-        1.0 + 0.26 * (3.0 * th + p1).sin()
-            + 0.16 * (7.0 * th + p2).sin()
-            + 0.09 * (17.0 * th + p3).sin()
-            + 0.05 * (31.0 * th + p1 + p2).sin()
-    };
-    let rf = r as f32;
-    let reach = (rf * 1.60) as i32 + 1;
-    let y0 = (cy - reach).max(0);
-    let y1 = (cy + reach).min(surf.h as i32 - 1);
-    for y in y0..=y1 {
-        let dy = (y - cy) as f32;
-        // Approximate where the wobbled edge crosses this row on each side:
-        // take the angle the plain circle would cross at, evaluate the
-        // wobbled radius there, and intersect that radius with the row.
-        let s = (dy / rf).clamp(-1.0, 1.0);
-        let th_right = s.asin();
-        let th_left = std::f32::consts::PI - th_right;
-        let er = rf * wobble(th_right);
-        let el = rf * wobble(th_left);
-        let half_r = (er * er - dy * dy).max(0.0).sqrt() as i32;
-        let half_l = (el * el - dy * dy).max(0.0).sqrt() as i32;
-        let x0 = (cx - half_l).max(0);
-        let x1 = (cx + half_r).min(surf.w as i32 - 1);
-        for x in x0..=x1 {
-            surf.put_px(x, y, BLACK);
+/// The stab flood: a paper-absorption cellular automaton (after the classic
+/// Suibokuga/Chinese-ink models). The page is a grid of 6px cells, each with
+/// an absorbency drawn from smooth value noise; ink spreads from the splat's
+/// own pixels to neighboring cells with probability set by absorbency and by
+/// how much ink already borders the cell. High-absorbency channels race
+/// ahead as fingers, low ones lag as bays — the stain GROWS, it is never
+/// scaled. Generations per frame accelerate until the page drowns.
+fn flood_soak(surf: &mut Surface, disp: &display::Display, seed_region: BBox) {
+    const CELL: i32 = 6;
+    if seed_region.is_empty() {
+        return;
+    }
+    let gw = (surf.w as i32 + CELL - 1) / CELL;
+    let gh = (surf.h as i32 + CELL - 1) / CELL;
+    let idx = |x: i32, y: i32| (y * gw + x) as usize;
+    // 0 = dry paper, 1 = inked, 2 = queued on the frontier.
+    let mut state = vec![0u8; (gw * gh) as usize];
+
+    // Seed: every cell whose center pixel is already dark inside the splat's
+    // bbox — the blob, its droplets, any writing the splat touched.
+    let mut inked = 0usize;
+    let cx0 = (seed_region.x0 / CELL).max(0);
+    let cy0 = (seed_region.y0 / CELL).max(0);
+    let cx1 = (seed_region.x1 / CELL).min(gw - 1);
+    let cy1 = (seed_region.y1 / CELL).min(gh - 1);
+    for cy in cy0..=cy1 {
+        for cx in cx0..=cx1 {
+            if surf.luma(cx * CELL + CELL / 2, cy * CELL + CELL / 2) < 128 {
+                state[idx(cx, cy)] = 1;
+                inked += 1;
+            }
         }
     }
+    const NBR: [(i32, i32); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+    let mut frontier: Vec<i32> = Vec::new();
+    for cy in (cy0 - 1).max(0)..=(cy1 + 1).min(gh - 1) {
+        for cx in (cx0 - 1).max(0)..=(cx1 + 1).min(gw - 1) {
+            if state[idx(cx, cy)] != 0 {
+                continue;
+            }
+            let touches = NBR.iter().any(|&(dx, dy)| {
+                let (nx, ny) = (cx + dx, cy + dy);
+                nx >= 0 && ny >= 0 && nx < gw && ny < gh && state[idx(nx, ny)] == 1
+            });
+            if touches {
+                state[idx(cx, cy)] = 2;
+                frontier.push(cy * gw + cx);
+            }
+        }
+    }
+    if frontier.is_empty() {
+        return;
+    }
+
+    // Absorbency 0..~100: bilinear value noise (~72px features — the paper's
+    // fibre structure) salted with per-cell grain.
+    let noise_seed = splat_seed(seed_region.x0, seed_region.y1);
+    let coarse = 12.0f32;
+    let lattice =
+        |lx: i32, ly: i32| (splat_hash(noise_seed, (ly * 517 + lx) as u32) % 1000) as f32 / 1000.0;
+    let absorb = |cx: i32, cy: i32| -> i32 {
+        let (fx, fy) = (cx as f32 / coarse, cy as f32 / coarse);
+        let (lx, ly) = (fx.floor() as i32, fy.floor() as i32);
+        let (tx, ty) = (fx - fx.floor(), fy - fy.floor());
+        let v = lattice(lx, ly) * (1.0 - tx) * (1.0 - ty)
+            + lattice(lx + 1, ly) * tx * (1.0 - ty)
+            + lattice(lx, ly + 1) * (1.0 - tx) * ty
+            + lattice(lx + 1, ly + 1) * tx * ty;
+        let grain = (splat_hash(noise_seed ^ 0xA5A5, (cy * gw + cx) as u32) % 30) as f32 / 100.0;
+        ((v * 0.85 + grain) * 100.0) as i32
+    };
+
+    let total = (gw * gh) as usize;
+    let mut gens_run = 0u32;
+    for frame in 0i32.. {
+        // Few generations at first (the soak visibly starts at the splat),
+        // many later (the page drowns in an accelerating rush).
+        let gens = (4.0 * 1.45f32.powi(frame)).min(260.0) as u32;
+        let mut newly: Vec<i32> = Vec::new();
+        for _ in 0..gens {
+            if frontier.is_empty() {
+                break;
+            }
+            gens_run += 1;
+            let mut next: Vec<i32> = Vec::with_capacity(frontier.len());
+            for &c in &frontier {
+                if state[c as usize] == 1 {
+                    continue;
+                }
+                let (cx, cy) = (c % gw, c / gw);
+                let mut n = 0;
+                for &(dx, dy) in &NBR {
+                    let (nx, ny) = (cx + dx, cy + dy);
+                    if nx >= 0 && ny >= 0 && nx < gw && ny < gh && state[idx(nx, ny)] == 1 {
+                        n += 1;
+                    }
+                }
+                let p = (18 + absorb(cx, cy) * 2 / 3 + n * 12).min(96) as u32;
+                if splat_hash(noise_seed ^ gens_run, c as u32) % 100 < p {
+                    state[c as usize] = 1;
+                    inked += 1;
+                    newly.push(c);
+                    for &(dx, dy) in &NBR {
+                        let (nx, ny) = (cx + dx, cy + dy);
+                        if nx >= 0 && ny >= 0 && nx < gw && ny < gh && state[idx(nx, ny)] == 0 {
+                            state[idx(nx, ny)] = 2;
+                            next.push(ny * gw + nx);
+                        }
+                    }
+                } else {
+                    next.push(c);
+                }
+            }
+            frontier = next;
+        }
+        // Ink the newly soaked cells as jittered discs: a grainy, fibrous
+        // front, never a lattice.
+        for &c in &newly {
+            let (cx, cy) = (c % gw, c / gw);
+            let h = splat_hash(noise_seed ^ 0x5EED, c as u32);
+            let jx = (h % 5) as i32 - 2;
+            let jy = ((h >> 4) % 5) as i32 - 2;
+            let r = 4 + ((h >> 8) % 3) as i32;
+            surf.stamp(cx * CELL + CELL / 2 + jx, cy * CELL + CELL / 2 + jy, r, BLACK);
+        }
+        disp.update(0, 0, surf.w as i32, surf.h as i32, true);
+        if frontier.is_empty() || inked >= total || frame > 28 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(120));
+    }
+    // Whatever stray dry specks remain, the ink claims: solid black before
+    // the drain, invisible against the already-drowned page.
+    surf.fill_rect(0, 0, surf.w, surf.h, BLACK);
+    disp.update(0, 0, surf.w as i32, surf.h as i32, true);
 }
 
 fn oracle_excuse(e: &str) -> String {
