@@ -450,11 +450,13 @@ fn run() -> std::io::Result<()> {
                         let (w, h) = (surf.w as i32, surf.h as i32);
                         let corners = [(0i32, 0i32), (w - 1, 0), (0, h - 1), (w - 1, h - 1)];
                         // Ease into the rush: the creep leans forward over
-                        // the first ~0.7s instead of snapping to full speed.
+                        // the first second or so instead of snapping to full
+                        // speed, and the full speed itself stays unhurried —
+                        // a drowning, not an explosion.
                         let mut frame = 0i32;
                         loop {
-                            let mult = 1.0 + (0.04 * frame as f32).min(0.30);
-                            let add = (3 + frame * 2).min(20) as f32;
+                            let mult = 1.0 + (0.025 * frame as f32).min(0.22);
+                            let add = (2 + frame).min(14) as f32;
                             let nr = (bl.r * mult + add).min(6000.0);
                             frame += 1;
                             bleed_grow(&mut surf, &mut bl, nr);
