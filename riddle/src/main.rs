@@ -439,27 +439,35 @@ fn run() -> std::io::Result<()> {
                 } else {
                     let held = t0.elapsed();
                     if held >= Duration::from_secs(3) {
-                        // The fang lands: the splat bursts, ink floods the
-                        // page, drains away — and the memory dies with it.
+                        // The fang lands. One continuous motion, no cuts:
+                        // the pooled splat SURGES — same seed, same shape,
+                        // growing frame by frame with fresh spatter landing —
+                        // then accelerates into the flood, whose wavefront
+                        // keeps the wobble (plus finger lobes) so the page is
+                        // swallowed by a stain, never a circle.
                         eprintln!("riddle: basilisk fang — the diary's memory is erased");
                         let seed = splat_seed(sx, sy);
-                        let b = draw_splat(&mut surf, sx, sy, 260, seed);
-                        let (bx, by, bw, bh) = b.rect();
-                        disp.update(bx, by, bw, bh, true);
-                        std::thread::sleep(Duration::from_millis(320));
+                        let mut r = stab_pool.max(10);
+                        while r < 300 {
+                            r = (r + 22).min(300);
+                            let b = draw_splat(&mut surf, sx, sy, r, seed);
+                            let (bx, by, bw, bh) = b.rect();
+                            disp.update(bx, by, bw, bh, true);
+                            std::thread::sleep(Duration::from_millis(45));
+                        }
                         let (w, h) = (surf.w as i32, surf.h as i32);
-                        // The wobble can pull the wavefront in to ~0.58×r, so
+                        // The wobble can pull the wavefront in to ~0.56×r, so
                         // overshoot the corner distance to be sure the final
                         // step swallows the whole page.
                         let maxr = {
                             let fx = sx.max(w - sx);
                             let fy = sy.max(h - sy);
-                            ((((fx * fx + fy * fy) as f64).sqrt() * 1.75) as i32) + 2
+                            ((((fx * fx + fy * fy) as f64).sqrt() * 2.3) as i32) + 2
                         };
-                        for step in 1..=5 {
-                            flood_splat(&mut surf, sx, sy, 260 + (maxr - 260) * step / 5, seed);
+                        for step in 1..=8 {
+                            flood_splat(&mut surf, sx, sy, 300 + (maxr - 300) * step / 8, seed);
                             disp.update(0, 0, w, h, true);
-                            std::thread::sleep(Duration::from_millis(150));
+                            std::thread::sleep(Duration::from_millis(110));
                         }
                         std::thread::sleep(Duration::from_millis(500));
                         if let Some(ref mut s) = store {
@@ -919,10 +927,12 @@ fn draw_splat(surf: &mut Surface, cx: i32, cy: i32, r: i32, seed: u32) -> BBox {
     }
 
     // Satellite droplets: fixed absolute positions derived from their own
-    // appearance threshold, so already-drawn droplets never move.
-    for i in 0..26u32 {
+    // appearance threshold, so already-drawn droplets never move. Thresholds
+    // run past the pooling range (≤110) so fresh spatter keeps landing
+    // through the death surge instead of the growth going bald.
+    for i in 0..48u32 {
         let h = splat_hash(seed, i);
-        let threshold = 12 + (h % 99) as i32; // r at which this droplet lands
+        let threshold = 12 + (h % 280) as i32; // r at which this droplet lands
         if r < threshold {
             continue;
         }
@@ -963,9 +973,18 @@ fn absorb_region(surf: &mut Surface, disp: &display::Display, region: BBox) {
 fn flood_splat(surf: &mut Surface, cx: i32, cy: i32, r: i32, seed: u32) {
     let p1 = (seed % 6283) as f32 / 1000.0;
     let p2 = ((seed >> 10) % 6283) as f32 / 1000.0;
-    let wobble = |th: f32| 1.0 + 0.26 * (3.0 * th + p1).sin() + 0.16 * (7.0 * th + p2).sin();
+    let p3 = ((seed >> 20) % 6283) as f32 / 1000.0;
+    // The splat's own lobes plus two higher-frequency ones: at page-scale
+    // radii the slow lobes read as smooth arcs, so the fast ones keep the
+    // front ragged — ink reaching out in fingers, never a circle.
+    let wobble = |th: f32| {
+        1.0 + 0.26 * (3.0 * th + p1).sin()
+            + 0.16 * (7.0 * th + p2).sin()
+            + 0.09 * (17.0 * th + p3).sin()
+            + 0.05 * (31.0 * th + p1 + p2).sin()
+    };
     let rf = r as f32;
-    let reach = (rf * 1.45) as i32 + 1;
+    let reach = (rf * 1.60) as i32 + 1;
     let y0 = (cy - reach).max(0);
     let y1 = (cy + reach).min(surf.h as i32 - 1);
     for y in y0..=y1 {
