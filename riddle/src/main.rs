@@ -448,13 +448,16 @@ fn run() -> std::io::Result<()> {
                         disp.update(bx, by, bw, bh, true);
                         std::thread::sleep(Duration::from_millis(320));
                         let (w, h) = (surf.w as i32, surf.h as i32);
+                        // The wobble can pull the wavefront in to ~0.58×r, so
+                        // overshoot the corner distance to be sure the final
+                        // step swallows the whole page.
                         let maxr = {
                             let fx = sx.max(w - sx);
                             let fy = sy.max(h - sy);
-                            (((fx * fx + fy * fy) as f64).sqrt() as i32) + 2
+                            ((((fx * fx + fy * fy) as f64).sqrt() * 1.75) as i32) + 2
                         };
                         for step in 1..=5 {
-                            flood_disc(&mut surf, sx, sy, 260 + (maxr - 260) * step / 5);
+                            flood_splat(&mut surf, sx, sy, 260 + (maxr - 260) * step / 5, seed);
                             disp.update(0, 0, w, h, true);
                             std::thread::sleep(Duration::from_millis(150));
                         }
@@ -953,16 +956,32 @@ fn absorb_region(surf: &mut Surface, disp: &display::Display, region: BBox) {
     }
 }
 
-/// One expanding pass of the stab flood: a solid black disc clipped to the
-/// page, drawn as row spans so a page-sized flood stays cheap.
-fn flood_disc(surf: &mut Surface, cx: i32, cy: i32, r: i32) {
-    let y0 = (cy - r).max(0);
-    let y1 = (cy + r).min(surf.h as i32 - 1);
+/// One expanding pass of the stab flood. The wavefront wobbles with the same
+/// seeded lobes as the splat, so the ink spreads as a growing stain rather
+/// than a circle. Row-span fill (two trig evaluations per row) keeps a
+/// page-sized flood cheap.
+fn flood_splat(surf: &mut Surface, cx: i32, cy: i32, r: i32, seed: u32) {
+    let p1 = (seed % 6283) as f32 / 1000.0;
+    let p2 = ((seed >> 10) % 6283) as f32 / 1000.0;
+    let wobble = |th: f32| 1.0 + 0.26 * (3.0 * th + p1).sin() + 0.16 * (7.0 * th + p2).sin();
+    let rf = r as f32;
+    let reach = (rf * 1.45) as i32 + 1;
+    let y0 = (cy - reach).max(0);
+    let y1 = (cy + reach).min(surf.h as i32 - 1);
     for y in y0..=y1 {
-        let dy = y - cy;
-        let half = (((r * r - dy * dy) as f64).sqrt()) as i32;
-        let x0 = (cx - half).max(0);
-        let x1 = (cx + half).min(surf.w as i32 - 1);
+        let dy = (y - cy) as f32;
+        // Approximate where the wobbled edge crosses this row on each side:
+        // take the angle the plain circle would cross at, evaluate the
+        // wobbled radius there, and intersect that radius with the row.
+        let s = (dy / rf).clamp(-1.0, 1.0);
+        let th_right = s.asin();
+        let th_left = std::f32::consts::PI - th_right;
+        let er = rf * wobble(th_right);
+        let el = rf * wobble(th_left);
+        let half_r = (er * er - dy * dy).max(0.0).sqrt() as i32;
+        let half_l = (el * el - dy * dy).max(0.0).sqrt() as i32;
+        let x0 = (cx - half_l).max(0);
+        let x1 = (cx + half_r).min(surf.w as i32 - 1);
         for x in x0..=x1 {
             surf.put_px(x, y, BLACK);
         }
