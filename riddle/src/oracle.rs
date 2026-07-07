@@ -254,7 +254,12 @@ impl HttpOracle {
         // Sent as "reasoning_effort" only when set: reasoning models accept it
         // ("low" ≈ faster first ink), but some providers reject the field on
         // non-reasoning models, so it must stay out of the default request.
-        let reasoning = std::env::var("RIDDLE_OPENAI_REASONING").ok();
+        // Set-but-empty (as the settings UI writes for the "" option) means
+        // unset — sending "reasoning_effort":"" is a 400 on OpenAI.
+        let reasoning = std::env::var("RIDDLE_OPENAI_REASONING")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         eprintln!(
             "riddle: http oracle base={base} model={model} max_tokens={max_tokens} reasoning={}",
             reasoning.as_deref().unwrap_or("-")
@@ -280,9 +285,12 @@ impl HttpOracle {
 
         thread::spawn(move || {
             // OpenAI chat-completions with a data-URI image part, streaming.
+            // The cap is sent as "max_completion_tokens": reasoning models
+            // (gpt-5.x, o-series) reject the legacy "max_tokens" outright,
+            // and every current OpenAI model accepts the new field.
             let body = format!(
                 concat!(
-                    "{{\"model\":{},\"stream\":true,\"max_tokens\":{},{}",
+                    "{{\"model\":{},\"stream\":true,\"max_completion_tokens\":{},{}",
                     "\"messages\":[",
                     "{{\"role\":\"system\",\"content\":{}}},",
                     "{{\"role\":\"user\",\"content\":[",

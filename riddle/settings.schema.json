@@ -26,7 +26,12 @@
       "key": "RIDDLE_OPENAI_REASONING",
       "label": "Reasoning effort",
       "kind": "select",
-      "options": ["", "low", "medium", "high"],
+      "options": [
+        "",
+        "low",
+        "medium",
+        "high"
+      ],
       "help": "Only for thinking models (Gemini 3.x, o-series). Leave empty otherwise."
     },
     {
@@ -35,6 +40,16 @@
       "kind": "text",
       "placeholder": "2000",
       "help": "Runaway guard. Thinking models count hidden reasoning tokens against it — keep it roomy."
+    },
+    {
+      "key": "RIDDLE_FOOTPRINTS",
+      "label": "Footprints",
+      "kind": "select",
+      "options": [
+        "",
+        "on"
+      ],
+      "help": "Stamp Tom's little footprints beside your ink while writing. Leave empty for off."
     }
   ],
   "presets": [

@@ -170,7 +170,12 @@ fn run() -> std::io::Result<()> {
     let mut stylus_tapped = false;
     let mut ink_dirty = BBox::empty();
     // Experiment: while drawing, stamp a tiny faded footprint beside the ink.
-    // This tests mixing precomposed pixel art with live pen updates.
+    // This tests mixing precomposed pixel art with live pen updates. Off by
+    // default — the stray prints read as ink blots over handwriting — and
+    // opt-in via RIDDLE_FOOTPRINTS=on (or 1/true/yes).
+    let footprints = std::env::var("RIDDLE_FOOTPRINTS")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "on" | "true" | "yes"))
+        .unwrap_or(false);
     let mut last_footstep: Option<(i32, i32)> = None;
     let mut footstep_i: u32 = 0;
     let mut last_flush = Instant::now();
@@ -264,7 +269,7 @@ fn run() -> std::io::Result<()> {
                             pen::Tool::Pen => {
                                 let r = 2 + s.pressure * 3 / pen::MAX_PRESSURE;
                                 let mut d = user_ink.pen_point(&mut surf, s.x, s.y, r);
-                                if should_stamp_footstep(last_footstep, s.x, s.y) {
+                                if footprints && should_stamp_footstep(last_footstep, s.x, s.y) {
                                     let f = draw_faded_footstep(&mut surf, s.x + 52, s.y - 38, footstep_i);
                                     d.add(f.x0, f.y0, 0);
                                     d.add(f.x1, f.y1, 0);
@@ -306,7 +311,7 @@ fn run() -> std::io::Result<()> {
                         pen_down = true;
                         let r = 2 + ev.d.clamp(0, 100) / 45;
                         let mut d = user_ink.pen_point(&mut surf, ev.x, ev.y, r);
-                        if should_stamp_footstep(last_footstep, ev.x, ev.y) {
+                        if footprints && should_stamp_footstep(last_footstep, ev.x, ev.y) {
                             let f = draw_faded_footstep(&mut surf, ev.x + 52, ev.y - 38, footstep_i);
                             d.add(f.x0, f.y0, 0);
                             d.add(f.x1, f.y1, 0);
