@@ -108,6 +108,13 @@ impl Ink {
     /// Crops to the ink bounding box and box-downscales so the long side stays
     /// ≤ 800px (at least 2x): the model reads handwriting fine at that scale,
     /// and image pixels are the dominant vision-token / latency cost.
+    ///
+    /// The image is built by replaying the stroke model into a clean offscreen
+    /// buffer — NOT by reading the screen — so anything else on the page (a
+    /// lingering reply the writer answers underneath) never leaks into what
+    /// the oracle sees. Erases already edit the stroke model (`forget_near`),
+    /// so the replay is faithful to the visible ink. `surf` is only consulted
+    /// for the page dimensions.
     pub fn to_png(&self, surf: &Surface, path: &str) -> std::io::Result<()> {
         if self.bbox.is_empty() {
             return Err(std::io::Error::other("no ink"));
@@ -117,8 +124,16 @@ impl Ink {
         let y0 = (by - 20).max(0) as usize;
         let x1 = ((bx + bw + 20) as usize).min(surf.w);
         let y1 = ((by + bh + 20) as usize).min(surf.h);
-        let f = ((x1 - x0).max(y1 - y0)).div_ceil(800).max(2);
-        let (w, h) = ((x1 - x0) / f, (y1 - y0) / f);
+        let (cw, ch) = (x1 - x0, y1 - y0);
+
+        // Full-resolution replay of the writer's ink on a white page crop.
+        let mut page = vec![255u8; cw * ch];
+        for stroke in self.strokes.iter().chain(std::iter::once(&self.current)) {
+            replay_stroke(&mut page, cw, ch, x0 as i32, y0 as i32, stroke);
+        }
+
+        let f = cw.max(ch).div_ceil(800).max(2);
+        let (w, h) = (cw / f, ch / f);
 
         let mut gray = vec![0u8; w * h];
         for oy in 0..h {
@@ -126,7 +141,7 @@ impl Ink {
                 let mut acc = 0u32;
                 for sy in 0..f {
                     for sx in 0..f {
-                        acc += surf.luma((x0 + ox * f + sx) as i32, (y0 + oy * f + sy) as i32) as u32;
+                        acc += page[(oy * f + sy) * cw + ox * f + sx] as u32;
                     }
                 }
                 gray[oy * w + ox] = (acc / (f * f) as u32) as u8;
@@ -144,6 +159,47 @@ impl Ink {
             .write_image_data(&gray)
             .map_err(std::io::Error::other)?;
         Ok(())
+    }
+}
+
+/// Replay one stroke into a grayscale crop buffer, mirroring the on-screen
+/// geometry of `pen_point`: first point stamps a disc; later points brush
+/// from the previous one with the same radius-growth clamp.
+fn replay_stroke(page: &mut [u8], w: usize, h: usize, ox: i32, oy: i32, pts: &[(i32, i32, i32)]) {
+    let mut last: Option<(i32, i32, i32)> = None;
+    for &(x, y, r) in pts {
+        let (cx, cy) = (x - ox, y - oy);
+        match last {
+            Some((px, py, pr)) => brush_g(page, w, h, px, py, cx, cy, r.min(pr + 1)),
+            None => stamp_g(page, w, h, cx, cy, r),
+        }
+        last = Some((cx, cy, r));
+    }
+}
+
+/// `Surface::stamp` (black ink) for a grayscale buffer.
+fn stamp_g(page: &mut [u8], w: usize, h: usize, cx: i32, cy: i32, r: i32) {
+    for dy in -r..=r {
+        for dx in -r..=r {
+            if dx * dx + dy * dy <= r * r {
+                let (x, y) = (cx + dx, cy + dy);
+                if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
+                    page[y as usize * w + x as usize] = 0;
+                }
+            }
+        }
+    }
+}
+
+/// `Surface::brush_line` (black ink) for a grayscale buffer.
+fn brush_g(page: &mut [u8], w: usize, h: usize, x0: i32, y0: i32, x1: i32, y1: i32, r: i32) {
+    let dx = (x1 - x0).abs();
+    let dy = (y1 - y0).abs();
+    let steps = dx.max(dy).max(1);
+    for i in 0..=steps {
+        let x = x0 + (x1 - x0) * i / steps;
+        let y = y0 + (y1 - y0) * i / steps;
+        stamp_g(page, w, h, x, y, r);
     }
 }
 
@@ -206,6 +262,44 @@ mod tests {
                 assert!((x - 110).pow(2) + (y - 100).pow(2) > 22 * 22);
             }
         }
+    }
+
+    #[test]
+    fn to_png_sees_only_the_stroke_model_not_the_screen() {
+        let (_buf, mut s) = surf();
+        let mut ink = Ink::new();
+        // The writer's ink: a short stroke.
+        for x in (60..=160).step_by(10) {
+            ink.pen_point(&mut s, x, 100, 3);
+        }
+        ink.pen_up();
+        // A "lingering reply" painted on the SCREEN near the ink (inside the
+        // crop, clear of the stroke), but not in the stroke model — it must
+        // not appear in the oracle snapshot.
+        s.stamp(110, 115, 8, BLACK);
+
+        let path = std::env::temp_dir().join("riddle-ink-test.png");
+        ink.to_png(&s, path.to_str().unwrap()).unwrap();
+
+        let dec = png::Decoder::new(std::fs::File::open(&path).unwrap());
+        let mut reader = dec.read_info().unwrap();
+        let mut img = vec![0u8; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut img).unwrap();
+        let (w, h) = (info.width as usize, info.height as usize);
+        let f = 2; // crop is small, so the min downscale factor applies
+        // Screen-blot center in image coords: crop starts at bbox-20.
+        let (bx, by, _, _) = ink.bbox.rect();
+        let (ix, iy) = ((110 - (bx - 20)) as usize / f, (115 - (by - 20)) as usize / f);
+        assert!(iy < h && ix < w, "blot should fall inside the crop");
+        assert!(
+            img[iy * w + ix] > 200,
+            "screen-only pixels leaked into the oracle snapshot (luma {})",
+            img[iy * w + ix]
+        );
+        // And the real stroke IS there.
+        let (sx, sy) = ((110 - (bx - 20)) as usize / f, (100 - (by - 20)) as usize / f);
+        assert!(img[sy * w + sx] < 60, "the writer's ink is missing from the snapshot");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
