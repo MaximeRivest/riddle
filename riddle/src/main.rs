@@ -38,7 +38,9 @@ const MARGIN_X: i32 = 120;
 
 enum State {
     Listening { last_pen: Option<Instant> },
-    Drinking { stage: u32, next: Instant, region: BBox, rx: mpsc::Receiver<Result<String, String>> },
+    /// `reply`: a lingering reply the writer wrote underneath — drunk
+    /// together with the new ink (empty when there was none).
+    Drinking { stage: u32, next: Instant, region: BBox, reply: BBox, rx: mpsc::Receiver<Result<String, String>> },
     Thinking { rx: mpsc::Receiver<Result<String, String>>, pulse: Instant, blot_on: bool },
     Replying { plan: WritePlan, next: Instant, rx: Option<mpsc::Receiver<Result<String, String>>> },
     Lingering { until: Instant, region: BBox },
@@ -178,6 +180,9 @@ fn run() -> std::io::Result<()> {
         .unwrap_or(false);
     let mut last_footstep: Option<(i32, i32)> = None;
     let mut footstep_i: u32 = 0;
+    // A reply the writer started answering while it still lingered on the
+    // page: it stays visible while they write and is drunk with their ink.
+    let mut pending_reply = BBox::empty();
     let mut last_flush = Instant::now();
     // Takeover swaps are cheap and synchronous; qtfb needs coalescing.
     let flush_every = if takeover { Duration::from_millis(8) } else { Duration::from_millis(35) };
@@ -262,6 +267,16 @@ fn run() -> std::io::Result<()> {
                     }
                     continue;
                 }
+                // Pen contact while a reply lingers: keep Tom's words on the
+                // page and start inking with this same contact — the reply is
+                // remembered and drunk together with the new ink at commit.
+                if let State::Lingering { region, .. } = state {
+                    if !region.is_empty() {
+                        pending_reply.add(region.x0, region.y0, 0);
+                        pending_reply.add(region.x1, region.y1, 0);
+                    }
+                    state = State::Listening { last_pen: None };
+                }
                 match state {
                     State::Listening { ref mut last_pen } => {
                         pen_down = true;
@@ -286,9 +301,6 @@ fn run() -> std::io::Result<()> {
                         }
                         *last_pen = Some(Instant::now());
                     }
-                    State::Lingering { region, .. } => {
-                        state = State::FadingReply { stage: 0, next: Instant::now(), region };
-                    }
                     _ => {}
                 }
             }
@@ -307,6 +319,15 @@ fn run() -> std::io::Result<()> {
                 qtfb::INPUT_PEN_PRESS | qtfb::INPUT_PEN_UPDATE => {
                     stylus_on = true;
                     stylus_tapped = true;
+                    // Same as the raw-pen path: writing over a lingering
+                    // reply keeps it on the page.
+                    if let State::Lingering { region, .. } = state {
+                        if !region.is_empty() {
+                            pending_reply.add(region.x0, region.y0, 0);
+                            pending_reply.add(region.x1, region.y1, 0);
+                        }
+                        state = State::Listening { last_pen: None };
+                    }
                     if let State::Listening { ref mut last_pen } = state {
                         pen_down = true;
                         let r = 2 + ev.d.clamp(0, 100) / 45;
@@ -323,8 +344,6 @@ fn run() -> std::io::Result<()> {
                             ink_dirty.add(d.x1, d.y1, 0);
                         }
                         *last_pen = Some(Instant::now());
-                    } else if let State::Lingering { region, .. } = state {
-                        state = State::FadingReply { stage: 0, next: Instant::now(), region };
                     }
                 }
                 qtfb::INPUT_PEN_RELEASE => {
@@ -378,26 +397,35 @@ fn run() -> std::io::Result<()> {
                             let _ = tx.send(Err("no oracle".into()));
                         }
                         let region = user_ink.bbox;
-                        State::Drinking { stage: 0, next: Instant::now(), region, rx }
+                        let reply = pending_reply;
+                        pending_reply = BBox::empty();
+                        State::Drinking { stage: 0, next: Instant::now(), region, reply, rx }
                     }
                 }
                 _ => State::Listening { last_pen },
             },
 
-            State::Drinking { stage, next, region, rx } => {
+            State::Drinking { stage, next, region, reply, rx } => {
                 const STAGES: u32 = 14;
                 if Instant::now() >= next {
                     ink::dissolve_pass(&mut surf, region, stage, STAGES);
                     let (x, y, w, h) = region.rect();
                     disp.update(x, y, w, h, true);
+                    // A reply the writer answered underneath dissolves along
+                    // with their ink.
+                    if !reply.is_empty() {
+                        ink::dissolve_pass(&mut surf, reply, stage, STAGES);
+                        let (x, y, w, h) = reply.rect();
+                        disp.update(x, y, w, h, true);
+                    }
                     if stage + 1 >= STAGES {
                         user_ink.clear();
                         State::Thinking { rx, pulse: Instant::now(), blot_on: false }
                     } else {
-                        State::Drinking { stage: stage + 1, next: Instant::now() + Duration::from_millis(70), region, rx }
+                        State::Drinking { stage: stage + 1, next: Instant::now() + Duration::from_millis(70), region, reply, rx }
                     }
                 } else {
-                    State::Drinking { stage, next, region, rx }
+                    State::Drinking { stage, next, region, reply, rx }
                 }
             }
 
