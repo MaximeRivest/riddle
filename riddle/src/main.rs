@@ -254,6 +254,14 @@ fn run() -> std::io::Result<()> {
     let mut stylus_on = false;
     let mut stylus_tapped = false;
     let mut ink_dirty = BBox::empty();
+    // Basilisk-fang erase: hold the eraser still on one spot for 3s and the
+    // diary's memory dies. (origin x, origin y, press start), the nominal
+    // splat radius already inked, and the bbox of everything the splat drew.
+    let mut stab: Option<(i32, i32, Instant)> = None;
+    let mut stab_pool: i32 = 0;
+    let mut stab_bbox = BBox::empty();
+    // Latest eraser contact this loop; None once the pen lifts or flips.
+    let mut eraser_at: Option<(i32, i32)> = None;
     let mut last_flush = Instant::now();
     // Takeover swaps are cheap and synchronous; qtfb needs coalescing.
     let flush_every = if takeover { Duration::from_millis(8) } else { Duration::from_millis(35) };
@@ -331,6 +339,7 @@ fn run() -> std::io::Result<()> {
                     if pen_down {
                         pen_down = false;
                         user_ink.pen_up();
+                        eraser_at = None;
                         if let State::Listening { ref mut last_pen } = state {
                             *last_pen = Some(Instant::now());
                         }
@@ -342,10 +351,21 @@ fn run() -> std::io::Result<()> {
                         pen_down = true;
                         let d = match s.tool {
                             pen::Tool::Pen => {
+                                eraser_at = None;
                                 let r = 2 + s.pressure * 3 / pen::MAX_PRESSURE;
                                 user_ink.pen_point(&mut surf, s.x, s.y, r)
                             }
-                            pen::Tool::Eraser => user_ink.erase_point(&mut surf, s.x, s.y, 22),
+                            pen::Tool::Eraser => {
+                                eraser_at = Some((s.x, s.y));
+                                // While the stab's warning ink pools, the tip
+                                // is a fang, not an eraser: don't erase (and
+                                // don't drop stroke points under the splat).
+                                if stab_pool > 0 {
+                                    BBox::empty()
+                                } else {
+                                    user_ink.erase_point(&mut surf, s.x, s.y, 22)
+                                }
+                            }
                         };
                         if !d.is_empty() {
                             ink_dirty.add(d.x0, d.y0, 0);
@@ -399,6 +419,87 @@ fn run() -> std::io::Result<()> {
                 }
                 _ => {}
             }
+        }
+
+        // ---- basilisk-fang stab (hold the eraser still for 3s) ----
+        let stab_live = pen_down && matches!(state, State::Listening { .. });
+        match (stab, eraser_at, stab_live) {
+            (None, Some((x, y)), true) => stab = Some((x, y, Instant::now())),
+            (Some((sx, sy, t0)), Some((x, y)), true) => {
+                let (dx, dy) = (x - sx, y - sy);
+                if dx * dx + dy * dy > 20 * 20 {
+                    // Drifted: this is erasing, not stabbing. Reabsorb any
+                    // warning ink and re-arm at the new spot.
+                    if !stab_bbox.is_empty() {
+                        absorb_region(&mut surf, &disp, stab_bbox);
+                    }
+                    stab = Some((x, y, Instant::now()));
+                    stab_pool = 0;
+                    stab_bbox = BBox::empty();
+                } else {
+                    let held = t0.elapsed();
+                    if held >= Duration::from_secs(3) {
+                        // The fang lands: the splat bursts, ink floods the
+                        // page, drains away — and the memory dies with it.
+                        eprintln!("riddle: basilisk fang — the diary's memory is erased");
+                        let seed = splat_seed(sx, sy);
+                        let b = draw_splat(&mut surf, sx, sy, 260, seed);
+                        let (bx, by, bw, bh) = b.rect();
+                        disp.update(bx, by, bw, bh, true);
+                        std::thread::sleep(Duration::from_millis(320));
+                        let (w, h) = (surf.w as i32, surf.h as i32);
+                        let maxr = {
+                            let fx = sx.max(w - sx);
+                            let fy = sy.max(h - sy);
+                            (((fx * fx + fy * fy) as f64).sqrt() as i32) + 2
+                        };
+                        for step in 1..=5 {
+                            flood_disc(&mut surf, sx, sy, 260 + (maxr - 260) * step / 5);
+                            disp.update(0, 0, w, h, true);
+                            std::thread::sleep(Duration::from_millis(150));
+                        }
+                        std::thread::sleep(Duration::from_millis(500));
+                        if let Some(ref mut s) = store {
+                            s.forget_all();
+                        }
+                        surf.fill_rect(0, 0, surf.w, surf.h, WHITE);
+                        disp.full_refresh(surf.w, surf.h);
+                        user_ink.clear();
+                        ink_dirty = BBox::empty();
+                        stab = None;
+                        stab_pool = 0;
+                        stab_bbox = BBox::empty();
+                        eraser_at = None;
+                        state = State::Listening { last_pen: None };
+                    } else if held >= Duration::from_secs(1) {
+                        // Warning ink pools at the stab point — the writer's
+                        // signal that the stab is registering; lift to abort.
+                        let ms = (held.as_millis() as i32 - 1000).clamp(0, 2000);
+                        let r = 10 + ms * 100 / 2000;
+                        if r >= stab_pool + 3 {
+                            let seed = splat_seed(sx, sy);
+                            let b = draw_splat(&mut surf, sx, sy, r, seed);
+                            stab_bbox.add(b.x0, b.y0, 0);
+                            stab_bbox.add(b.x1, b.y1, 0);
+                            let (bx, by, bw, bh) = b.rect();
+                            disp.update(bx, by, bw, bh, true);
+                            stab_pool = r;
+                        }
+                    }
+                }
+            }
+            (Some(_), _, _) => {
+                // Lifted (or the state moved on): abort, reabsorb the warning
+                // ink. Anything under the splat goes with it — the writer did
+                // press an eraser there.
+                if !stab_bbox.is_empty() {
+                    absorb_region(&mut surf, &disp, stab_bbox);
+                }
+                stab = None;
+                stab_pool = 0;
+                stab_bbox = BBox::empty();
+            }
+            _ => {}
         }
 
         // ---- coalesced ink flush ----
@@ -770,6 +871,104 @@ fn region_all_white(surf: &Surface, region: BBox) -> bool {
 
 /// What Tom writes when the spirit cannot answer: short, in a diary's voice,
 /// but specific enough to act on. The raw error still goes to stderr.
+/// Deterministic per-stab randomness: the splat keeps its shape as it grows.
+fn splat_seed(x: i32, y: i32) -> u32 {
+    let mut h = (x as u32).wrapping_mul(0x9E37_79B1) ^ (y as u32).wrapping_mul(0x85EB_CA6B);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0xC2B2_AE35);
+    h ^ (h >> 16)
+}
+
+/// Per-droplet hash stream (stable across redraws).
+fn splat_hash(seed: u32, i: u32) -> u32 {
+    let mut h = seed.wrapping_add(i.wrapping_mul(0x9E37_79B1));
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x85EB_CA6B);
+    h ^ (h >> 13)
+}
+
+/// Draw an ink splat of nominal radius `r`: an irregular blob (its edge
+/// wobbles with two sine lobes, phases from `seed`) ringed by satellite
+/// droplets and radial streaks. Droplets have fixed positions and appear as
+/// `r` passes each one's threshold, so a growing splat spreads organically —
+/// pixels only ever gain ink, never lose it, between redraws at the same
+/// seed. Returns the bbox of everything drawn.
+fn draw_splat(surf: &mut Surface, cx: i32, cy: i32, r: i32, seed: u32) -> BBox {
+    let mut bbox = BBox::empty();
+
+    // The main blob: edge(θ) = r · (1 + 0.26·sin(3θ+p1) + 0.16·sin(7θ+p2)).
+    let p1 = (seed % 6283) as f32 / 1000.0;
+    let p2 = ((seed >> 10) % 6283) as f32 / 1000.0;
+    let rmax = (r as f32 * 1.45) as i32 + 2;
+    for dy in -rmax..=rmax {
+        for dx in -rmax..=rmax {
+            let d = ((dx * dx + dy * dy) as f32).sqrt();
+            if d > rmax as f32 {
+                continue;
+            }
+            let th = (dy as f32).atan2(dx as f32);
+            let edge = r as f32 * (1.0 + 0.26 * (3.0 * th + p1).sin() + 0.16 * (7.0 * th + p2).sin());
+            if d <= edge {
+                surf.put_px(cx + dx, cy + dy, BLACK);
+                bbox.add(cx + dx, cy + dy, 1);
+            }
+        }
+    }
+
+    // Satellite droplets: fixed absolute positions derived from their own
+    // appearance threshold, so already-drawn droplets never move.
+    for i in 0..26u32 {
+        let h = splat_hash(seed, i);
+        let threshold = 12 + (h % 99) as i32; // r at which this droplet lands
+        if r < threshold {
+            continue;
+        }
+        let ang = ((h >> 7) % 6283) as f32 / 1000.0;
+        let dist = threshold as f32 * (1.3 + ((h >> 17) % 100) as f32 / 80.0);
+        let size = 2 + ((h >> 24) % 5) as i32;
+        let (px, py) = (cx + (dist * ang.cos()) as i32, cy + (dist * ang.sin()) as i32);
+        surf.stamp(px, py, size, BLACK);
+        bbox.add(px, py, size + 1);
+        // Every third droplet is flung: a radial streak of shrinking dots.
+        if h % 3 == 0 {
+            for step in 1..=3 {
+                let d2 = dist + (step * (size + 2)) as f32;
+                let (qx, qy) = (cx + (d2 * ang.cos()) as i32, cy + (d2 * ang.sin()) as i32);
+                let sr = (size - step / 2).max(1);
+                surf.stamp(qx, qy, sr, BLACK);
+                bbox.add(qx, qy, sr + 1);
+            }
+        }
+    }
+    bbox
+}
+
+/// Reabsorb warning ink after an aborted stab: dissolve the region in place.
+fn absorb_region(surf: &mut Surface, disp: &display::Display, region: BBox) {
+    for stage in 0..8 {
+        ink::dissolve_pass(surf, region, stage, 8);
+        let (x, y, w, h) = region.rect();
+        disp.update(x, y, w, h, true);
+        std::thread::sleep(Duration::from_millis(45));
+    }
+}
+
+/// One expanding pass of the stab flood: a solid black disc clipped to the
+/// page, drawn as row spans so a page-sized flood stays cheap.
+fn flood_disc(surf: &mut Surface, cx: i32, cy: i32, r: i32) {
+    let y0 = (cy - r).max(0);
+    let y1 = (cy + r).min(surf.h as i32 - 1);
+    for y in y0..=y1 {
+        let dy = y - cy;
+        let half = (((r * r - dy * dy) as f64).sqrt()) as i32;
+        let x0 = (cx - half).max(0);
+        let x1 = (cx + half).min(surf.w as i32 - 1);
+        for x in x0..=x1 {
+            surf.put_px(x, y, BLACK);
+        }
+    }
+}
+
 fn oracle_excuse(e: &str) -> String {
     if e.contains("no oracle") {
         "The diary lies dormant: it found no oracle. \

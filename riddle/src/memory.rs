@@ -109,6 +109,15 @@ impl MemoryStore {
         self.prune();
     }
 
+    /// The basilisk fang lands: forget every remembered page, on disk too.
+    pub fn forget_all(&mut self) {
+        for e in &self.entries {
+            let _ = std::fs::remove_file(self.strokes_path(e.id));
+        }
+        let _ = std::fs::remove_file(self.index_path());
+        self.entries.clear();
+    }
+
     /// Forget the oldest pages beyond MAX_MEMORIES.
     fn prune(&mut self) {
         if self.entries.len() <= MAX_MEMORIES {
