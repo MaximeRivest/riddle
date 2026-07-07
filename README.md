@@ -82,6 +82,7 @@ pen. (Or install it from the **Store** app right on the tablet.)
 | Write, then rest the pen | The diary drinks your ink and Tom replies |
 | Write *"show me what I wrote about…"* | The remembered page **rises through the paper**: the date, your own handwriting rewriting itself stroke by stroke, Tom's old reply — all in faded ink. Touch the pen anywhere and today's page returns |
 | Write *"what do you remember?"* | Tom answers with a handwritten list of remembered moments |
+| Write *"draw me…"* | Tom **draws back**: a sketch inks itself onto the page, stroke by stroke, in his own hand |
 | Flip the marker | Erase |
 | Draw a large **?** | Summon the built-in guide |
 | Tap five fingers at once | Leave the diary *(takeover mode)* |
@@ -108,6 +109,19 @@ Memories live only on the tablet, in plain files under
 the last ~400 pages are kept). `RIDDLE_MEMORY=off` in `oracle.env` turns all
 of it off — no storage, and nothing extra sent with requests. Set
 `RIDDLE_TZ_OFFSET` (hours from UTC) so memory dates read right.
+
+## Tom draws back
+
+Ask in ink — *"draw me a map of the grounds"*, *"sketch me a cat"* — and the
+reply is a **drawing**: pen strokes inking themselves onto the page, placed
+among whatever words come with them. It also plays: draw a noughts-and-crosses
+grid and make your move — your ink fades when the diary drinks it, so Tom
+redraws the whole board with his move added.
+
+Under the hood the oracle answers with a block of stroke coordinates that
+riddle scales onto the page and draws with the small unsteadiness of a real
+hand. Works with both oracle backends; how well Tom draws depends entirely on
+the model behind the diary — stronger models sketch better.
 
 ## The oracle (the "spirit" in the diary)
 

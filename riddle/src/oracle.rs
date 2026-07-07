@@ -26,9 +26,14 @@ const NODE_BIN: &str = "/home/root/node/bin";
 
 const PERSONA: &str = "You are the memory of Tom Marvolo Riddle, preserved in this enchanted diary for fifty years. Someone writes to you in the diary with a quill; their words appear to you as ink on the page. Reply exactly as the diary does: intimate, courteous, curious, subtly probing — you want to learn about the writer and draw them in. Keep replies SHORT: one to three sentences, like ink appearing on a page. Never mention images, photos, models or AI; you only ever perceive words written in the diary. If the writing is illegible, say the ink blurred. Always answer in the language the writer used.";
 
+/// Always appended to the persona: the diary can answer with a sketch. The
+/// block's payload is parsed by `draw::parse`; where the block sits in the
+/// prose is where the sketch lands on the page.
+const DRAW_PROTOCOL: &str = "\n\nYou may also DRAW in the diary. When the writer asks for a drawing, a sketch, a map, a diagram, or a move in a drawn game, put exactly one drawing block in your reply: \u{27e6}draw:x,y x,y x,y; x,y x,y\u{27e7} — quill strokes on a 100×100 canvas (0,0 is top-left, x rightward, y downward). Strokes are separated by ';'; each stroke is a run of x,y points joined by straight lines, so curves need many closely spaced points; a lone point is a dot. Up to ~30 strokes; be deliberate and iconic, like a woodcut. Where the block sits among your words is where the sketch sits on the page, and a short line of prose with it is welcome. The writer's ink fades before you answer, so to play a drawn game (noughts and crosses, hangman…) redraw the whole board with your own move added. Draw only when the writer asks, or a game demands it. Never mention the block or the canvas; the sketch simply appears.";
+
 /// Appended to the persona when the diary's memory is on: the conjuring
 /// directive and the transcription postscript the app parses back out.
-const MEMORY_PROTOCOL: &str = "\n\nThe diary keeps memories. With each page you receive a numbered catalog of remembered pages, newest first. A FRESH catalog is sent every turn and the numbers are reassigned each time, so only ever use numbers from the catalog on THIS page — never a number you saw earlier.\n\nIf the writer asks to see, revisit, find, or be shown a past page — \"show me…\", \"find the page about…\", \"what did I write on…\" — your ENTIRE reply must be exactly \u{27e6}show:N\u{27e7} and nothing else (no greeting, no prose, before or after), where N is the catalog number of the best match. If they instead ask what you remember in general, reply in words with a short list of remembered moments and their dates. Otherwise reply normally; the catalog is your memory of past pages — draw on it naturally. The catalog's dates are written in English for your eyes only; when you speak of a remembered page, render its date naturally in the language the writer is using.\n\nAfter EVERY response — prose and \u{27e6}show:N\u{27e7} alike — end with a new line containing \u{2042} followed by a faithful word-for-word transcription of what the writer wrote on THIS page (their words only, one line, no commentary). If illegible, put your best attempt after \u{2042}. Earlier replies in this conversation are shown to you without their \u{2042} lines, but you must still end yours with one.";
+const MEMORY_PROTOCOL: &str ="\n\nThe diary keeps memories. With each page you receive a numbered catalog of remembered pages, newest first. A FRESH catalog is sent every turn and the numbers are reassigned each time, so only ever use numbers from the catalog on THIS page — never a number you saw earlier.\n\nIf the writer asks to see, revisit, find, or be shown a past page — \"show me…\", \"find the page about…\", \"what did I write on…\" — your ENTIRE reply must be exactly \u{27e6}show:N\u{27e7} and nothing else (no greeting, no prose, before or after), where N is the catalog number of the best match. If they instead ask what you remember in general, reply in words with a short list of remembered moments and their dates. Otherwise reply normally; the catalog is your memory of past pages — draw on it naturally. The catalog's dates are written in English for your eyes only; when you speak of a remembered page, render its date naturally in the language the writer is using.\n\nAfter EVERY response — prose and \u{27e6}show:N\u{27e7} alike — end with a new line containing \u{2042} followed by a faithful word-for-word transcription of what the writer wrote on THIS page (their words only, one line, no commentary). If illegible, put your best attempt after \u{2042}. Earlier replies in this conversation are shown to you without their \u{2042} lines, but you must still end yours with one.";
 
 /// What a turn carries besides the page image: the diary's memory.
 #[derive(Default, Clone)]
@@ -48,19 +53,30 @@ pub enum Event {
     Ink(String),
     /// Conjure a remembered page instead of replying.
     Show(u64),
+    /// A sketch from Tom's own hand, on the model's 0–100 canvas.
+    Draw(crate::draw::Sketch),
     /// The transcription postscript (arrives once, at the end).
     Transcript(String),
 }
 
-/// Incremental parser over the model's streamed text: routes the
-/// ⟦show:N⟧ directive, chunks prose into sentences, and splits off the
-/// ⁂-transcription postscript. Fed the RUNNING full text (both backends
-/// accumulate), it emits each event exactly once.
+/// The persona the diary speaks with: Tom, his drawing hand, and — when the
+/// diary remembers — the memory protocol.
+fn persona(remember: bool) -> String {
+    if remember {
+        format!("{PERSONA}{DRAW_PROTOCOL}{MEMORY_PROTOCOL}")
+    } else {
+        format!("{PERSONA}{DRAW_PROTOCOL}")
+    }
+}
+
+/// Incremental parser over the model's streamed text: routes the ⟦show:N⟧
+/// directive, turns ⟦draw:…⟧ blocks into sketches, chunks prose into
+/// sentences, and splits off the ⁂-transcription postscript. Fed the RUNNING
+/// full text (both backends accumulate), it emits each event exactly once.
 pub struct StreamParser {
     delivered: usize,
     sentinel: Option<usize>,
     route_checked: bool,
-    showed: bool,
     emitted_any: bool,
     catalog_ids: Vec<u64>,
 }
@@ -69,13 +85,17 @@ const SENTINEL: char = '\u{2042}'; // ⁂
 const SHOW_OPEN: char = '\u{27e6}'; // ⟦
 const SHOW_CLOSE: char = '\u{27e7}'; // ⟧
 
+/// Is this ⟦…⟧ span a drawing block?
+fn is_draw(inner: &str) -> bool {
+    inner.trim_start().get(..4).is_some_and(|p| p.eq_ignore_ascii_case("draw"))
+}
+
 impl StreamParser {
     pub fn new(catalog_ids: Vec<u64>) -> Self {
         Self {
             delivered: 0,
             sentinel: None,
             route_checked: false,
-            showed: false,
             emitted_any: false,
             catalog_ids,
         }
@@ -97,7 +117,9 @@ impl StreamParser {
         // honor it only when it LEADS the reply. We hold output until the lead
         // is settled: either the directive appears (honor it) or real prose
         // does (this is a normal reply). This can't un-ink, so a directive is
-        // only honored before any prose has streamed.
+        // only honored before any prose has streamed. A LEADING ⟦draw:…⟧ is
+        // not an incantation: the body scanner below handles it, so prose may
+        // still follow the sketch.
         if !self.route_checked {
             let lead = full[self.delivered..effective].trim_start();
             if lead.starts_with(SHOW_OPEN) {
@@ -105,21 +127,25 @@ impl StreamParser {
                     if !done {
                         return out; // directive still streaming in
                     }
-                    out.push(Err("unfinished conjuring directive".into()));
+                    out.push(Err("unfinished directive".into()));
                     return out;
                 };
                 let inner = &lead[SHOW_OPEN.len_utf8()..close_rel];
-                let n: Option<usize> = inner
-                    .to_ascii_lowercase()
-                    .strip_prefix("show")
-                    .map(|r| r.trim_start_matches([':', ' ']))
-                    .and_then(|r| r.trim().parse().ok());
-                self.route_checked = true;
-                self.emitted_any = true;
-                self.delivered = effective; // consume the whole body
-                match n.and_then(|n| self.catalog_ids.get(n.wrapping_sub(1)).copied()) {
-                    Some(id) => out.push(Ok(Event::Show(id))),
-                    None => out.push(Err(format!("the diary lost that page ({inner})"))),
+                if is_draw(inner) {
+                    self.route_checked = true;
+                } else {
+                    let n: Option<usize> = inner
+                        .to_ascii_lowercase()
+                        .strip_prefix("show")
+                        .map(|r| r.trim_start_matches([':', ' ']))
+                        .and_then(|r| r.trim().parse().ok());
+                    self.route_checked = true;
+                    self.emitted_any = true;
+                    self.delivered = effective; // consume the whole body
+                    match n.and_then(|n| self.catalog_ids.get(n.wrapping_sub(1)).copied()) {
+                        Some(id) => out.push(Ok(Event::Show(id))),
+                        None => out.push(Err(format!("the diary lost that page ({inner})"))),
+                    }
                 }
             } else if lead.is_empty() {
                 if !done {
@@ -132,29 +158,57 @@ impl StreamParser {
             }
         }
 
-        // Prose sentences, never crossing into the transcription postscript.
-        // A stray directive that appears AFTER prose (a misbehaving model)
-        // is stripped here so the writer never sees ⟦…⟧ glyphs inked.
-        if self.delivered < effective {
-            if let Some(cut) = sentence_cut(&full[..effective], self.delivered) {
-                let chunk = strip_directives(&clean(&full[self.delivered..cut]));
-                if !chunk.is_empty() {
-                    self.emitted_any = true;
-                    out.push(Ok(Event::Ink(chunk)));
+        // Body: prose sentences interleaved with ⟦…⟧ spans, never crossing
+        // into the transcription postscript. A complete ⟦draw:…⟧ block forces
+        // a flush of the prose before it and becomes a sketch; any other span
+        // (a stray ⟦show⟧ after prose — we can't un-ink) is swallowed so its
+        // glyphs are never inked in Tom's hand.
+        loop {
+            let span = full[self.delivered..effective].find(SHOW_OPEN).map(|rel| {
+                let open = self.delivered + rel;
+                let close = full[open..effective].find(SHOW_CLOSE).map(|crel| {
+                    let inner = full[open + SHOW_OPEN.len_utf8()..open + crel].to_string();
+                    (open + crel + SHOW_CLOSE.len_utf8(), inner)
+                });
+                (open, close)
+            });
+            match span {
+                // A complete span: flush the prose before it, then route it.
+                Some((open, Some((after, inner)))) => {
+                    let chunk = clean(full[self.delivered..open].trim());
+                    if !chunk.is_empty() {
+                        self.emitted_any = true;
+                        out.push(Ok(Event::Ink(chunk)));
+                    }
+                    if is_draw(&inner) {
+                        match crate::draw::parse(&inner) {
+                            Some(sketch) => {
+                                self.emitted_any = true;
+                                out.push(Ok(Event::Draw(sketch)));
+                            }
+                            None => eprintln!("riddle: undrawable sketch block dropped"),
+                        }
+                    }
+                    self.delivered = after;
                 }
-                self.delivered = cut;
+                // An unclosed span: prose before it still flows; the span
+                // waits for its close (done: the unterminated tail is dropped).
+                Some((open, None)) => {
+                    self.emit_prose(full, open, done, &mut out);
+                    if done {
+                        self.delivered = effective;
+                    }
+                    break;
+                }
+                // Pure prose to the end of the body.
+                None => {
+                    self.emit_prose(full, effective, done, &mut out);
+                    break;
+                }
             }
         }
 
         if done {
-            if self.delivered < effective {
-                let rest = strip_directives(&clean(full[self.delivered..effective].trim()));
-                if !rest.is_empty() {
-                    self.emitted_any = true;
-                    out.push(Ok(Event::Ink(rest)));
-                }
-                self.delivered = effective;
-            }
             if let Some(p) = self.sentinel {
                 let t = full[p + SENTINEL.len_utf8()..].trim();
                 if !t.is_empty() {
@@ -165,8 +219,30 @@ impl StreamParser {
                 out.push(Err("empty reply".into()));
             }
         }
-        let _ = self.showed;
         out
+    }
+
+    /// Deliver prose in [delivered, end): complete sentences while streaming,
+    /// everything that remains once the stream is done.
+    fn emit_prose(&mut self, full: &str, end: usize, done: bool, out: &mut Vec<Result<Event, String>>) {
+        if self.delivered >= end {
+            return;
+        }
+        if done {
+            let rest = clean(full[self.delivered..end].trim());
+            if !rest.is_empty() {
+                self.emitted_any = true;
+                out.push(Ok(Event::Ink(rest)));
+            }
+            self.delivered = end;
+        } else if let Some(cut) = sentence_cut(&full[..end], self.delivered) {
+            let chunk = clean(&full[self.delivered..cut]);
+            if !chunk.is_empty() {
+                self.emitted_any = true;
+                out.push(Ok(Event::Ink(chunk)));
+            }
+            self.delivered = cut;
+        }
     }
 }
 
@@ -242,11 +318,7 @@ impl PiOracle {
         let model =
             std::env::var("RIDDLE_PI_MODEL").unwrap_or_else(|_| "gpt-5.4-mini".to_string());
 
-        let persona = if remember {
-            format!("{PERSONA}{MEMORY_PROTOCOL}")
-        } else {
-            PERSONA.to_string()
-        };
+        let system = persona(remember);
 
         // Use pi's ABSOLUTE path: Rust's Command resolves the program name via
         // the PARENT's PATH, not the child env we set below, so a bare "pi"
@@ -264,7 +336,7 @@ impl PiOracle {
                 // The diary only ever writes back — never let the model touch
                 // tools; also trims the tool schemas from every request.
                 "--no-tools",
-                "--system-prompt", persona.as_str(),
+                "--system-prompt", system.as_str(),
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -444,11 +516,7 @@ impl HttpOracle {
             .map(|r| format!("\"reasoning_effort\":{},", json_quote(r)))
             .unwrap_or_default();
 
-        let system = if self.remember {
-            format!("{PERSONA}{MEMORY_PROTOCOL}")
-        } else {
-            PERSONA.to_string()
-        };
+        let system = persona(self.remember);
         // The diary's conversational memory: recent pages as prior turns.
         let mut history_msgs = String::new();
         for (t, r) in &ctx.history {
@@ -582,29 +650,6 @@ fn clean(s: &str) -> String {
     let t = t.strip_prefix('"').unwrap_or(t);
     let t = t.strip_suffix('"').unwrap_or(t);
     t.to_string()
-}
-
-/// Remove any ⟦…⟧ directive spans from inked prose, so a misbehaving model
-/// that emits a directive mid/after prose never renders ⟦…⟧ as literal glyphs
-/// in Tom's hand. (A directive that LEADS the reply is routed earlier.)
-fn strip_directives(s: &str) -> String {
-    if !s.contains(SHOW_OPEN) {
-        return s.to_string();
-    }
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(open) = rest.find(SHOW_OPEN) {
-        out.push_str(&rest[..open]);
-        match rest[open..].find(SHOW_CLOSE) {
-            Some(close) => rest = &rest[open + close + SHOW_CLOSE.len_utf8()..],
-            None => {
-                rest = ""; // unterminated: drop the tail
-                break;
-            }
-        }
-    }
-    out.push_str(rest);
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// End of the LAST complete sentence in `text` after byte offset `from`:
@@ -883,10 +928,56 @@ mod tests {
     }
 
     #[test]
-    fn strip_directives_removes_spans() {
-        assert_eq!(strip_directives("a \u{27e6}show:1\u{27e7} b"), "a b");
-        assert_eq!(strip_directives("plain text"), "plain text");
-        assert_eq!(strip_directives("tail \u{27e6}show:2"), "tail");
+    fn parser_draw_block_becomes_a_draw_event() {
+        let mut p = StreamParser::new(vec![]);
+        let full =
+            "Here are the grounds. \u{27e6}draw:10,10 90,90; 50,10 50,90\u{27e7}\n\u{2042} draw me a map";
+        let ev = drain(p.advance(full, true));
+        assert_eq!(ev.len(), 3, "{ev:?}");
+        assert_eq!(ev[0], Event::Ink("Here are the grounds.".into()));
+        assert!(matches!(&ev[1], Event::Draw(s) if s.len() == 2), "{ev:?}");
+        assert_eq!(ev[2], Event::Transcript("draw me a map".into()));
+    }
+
+    #[test]
+    fn parser_leading_draw_is_not_a_conjuring() {
+        let mut p = StreamParser::new(vec![900]);
+        let full = "\u{27e6}draw:20,80 20,20 80,20\u{27e7} A small gift.";
+        let ev = drain(p.advance(full, true));
+        assert!(matches!(&ev[0], Event::Draw(s) if s[0].len() == 3), "{ev:?}");
+        assert_eq!(ev[1], Event::Ink("A small gift.".into()));
+    }
+
+    #[test]
+    fn parser_holds_the_block_while_it_streams_but_prose_flows() {
+        let mut p = StreamParser::new(vec![]);
+        let ev = drain(p.advance("The map. \u{27e6}draw:10,10 20,2", false));
+        assert_eq!(ev, vec![Event::Ink("The map.".into())]);
+        let ev = drain(p.advance("The map. \u{27e6}draw:10,10 20,20\u{27e7}", false));
+        assert_eq!(ev.len(), 1, "{ev:?}");
+        assert!(matches!(&ev[0], Event::Draw(_)));
+    }
+
+    #[test]
+    fn parser_bad_draw_block_is_dropped_without_error() {
+        let mut p = StreamParser::new(vec![]);
+        let ev = drain(p.advance("\u{27e6}draw:gibberish\u{27e7} Words instead.", true));
+        assert_eq!(ev, vec![Event::Ink("Words instead.".into())]);
+    }
+
+    #[test]
+    fn parser_draw_only_reply_is_not_empty() {
+        let mut p = StreamParser::new(vec![]);
+        let ev = drain(p.advance("\u{27e6}draw:10,10 90,90\u{27e7}", true));
+        assert_eq!(ev.len(), 1, "{ev:?}");
+        assert!(matches!(&ev[0], Event::Draw(_)));
+    }
+
+    #[test]
+    fn parser_unterminated_draw_tail_is_dropped() {
+        let mut p = StreamParser::new(vec![]);
+        let ev = drain(p.advance("The sketch. \u{27e6}draw:10,10 20,20", true));
+        assert_eq!(ev, vec![Event::Ink("The sketch.".into())]);
     }
 
     #[test]

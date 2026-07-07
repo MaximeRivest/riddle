@@ -8,6 +8,7 @@
 //! built with --features takeover and launched with xochitl stopped.
 
 mod display;
+mod draw;
 mod fb;
 mod help;
 mod ink;
@@ -153,6 +154,18 @@ fn oracle_test(png: &str) -> i32 {
             Ok(Ok(Event::Show(id))) => {
                 println!("[would conjure memory {id} — {}]", memory::spoken_date(id));
                 got.push_str("(show)");
+            }
+            Ok(Ok(Event::Draw(s))) => {
+                let pts: usize = s.iter().map(|st| st.len()).sum();
+                println!("[sketch: {} strokes, {pts} points]", s.len());
+                // The raw canvas strokes, one per line — handy when judging
+                // how well a model draws before pointing the diary at it.
+                for stroke in &s {
+                    let line: Vec<String> =
+                        stroke.iter().map(|&(x, y)| format!("{x:.0},{y:.0}")).collect();
+                    eprintln!("[stroke] {}", line.join(" "));
+                }
+                got.push_str("(sketch)");
             }
             Ok(Ok(Event::Transcript(t))) => eprintln!("\n[transcript] {t}"),
             Ok(Err(e)) => {
@@ -509,6 +522,19 @@ fn run() -> std::io::Result<()> {
                             let plan = plan_reply(&font, &text, None);
                             State::Replying { plan, next: Instant::now(), rx: Some(rx) }
                         }
+                        Ok(Event::Draw(sketch)) => {
+                            // The reply leads with a sketch: draw it, and keep
+                            // the receiver for whatever prose follows.
+                            match plan_drawing(&sketch, None) {
+                                Some(plan) => {
+                                    if turn_reply.is_empty() {
+                                        turn_reply.push_str("(the diary drew)");
+                                    }
+                                    State::Replying { plan, next: Instant::now(), rx: Some(rx) }
+                                }
+                                None => State::Thinking { rx, pulse, blot_on, since },
+                            }
+                        }
                         Ok(Event::Transcript(t)) => {
                             // Transcript with no prose (model skipped the
                             // reply): remember the words, keep waiting.
@@ -569,6 +595,12 @@ fn run() -> std::io::Result<()> {
                         Ok(Ok(Event::Transcript(t))) => {
                             turn_transcript = Some(t);
                             false // the disconnect is still coming
+                        }
+                        Ok(Ok(Event::Draw(sketch))) => {
+                            // A sketch mid-reply: splice it in below the prose
+                            // written so far, like any other streamed chunk.
+                            append_drawing(&mut plan, &sketch);
+                            false
                         }
                         Ok(Ok(Event::Show(_))) => {
                             eprintln!("riddle: conjuring directive mid-reply ignored");
@@ -889,6 +921,33 @@ fn plan_reply(font: &FontRef, text: &str, y_start: Option<i32>) -> WritePlan {
     }
 
     WritePlan { strokes, stroke_i: 0, point_i: 0, region, next_y: y }
+}
+
+/// Lay a sketch from Tom's hand onto the page as a write plan. `y_start`
+/// continues below streamed prose; None places a drawing-led reply.
+fn plan_drawing(sketch: &draw::Sketch, y_start: Option<i32>) -> Option<WritePlan> {
+    let y_top = y_start.unwrap_or(320);
+    let (strokes, bottom) = draw::place(sketch, y_top, draw::sketch_seed(sketch))?;
+    let mut region = BBox::empty();
+    for s in &strokes {
+        for &(x, y) in s {
+            region.add(x, y, 5);
+        }
+    }
+    Some(WritePlan { strokes, stroke_i: 0, point_i: 0, region, next_y: bottom + 80 })
+}
+
+/// Splice a streamed sketch into a running write animation, below the prose
+/// written so far. Skipped (with a log) when the page has no room left.
+fn append_drawing(plan: &mut WritePlan, sketch: &draw::Sketch) {
+    let Some(cont) = plan_drawing(sketch, Some(plan.next_y + 30)) else {
+        eprintln!("riddle: no room left on the page for the sketch");
+        return;
+    };
+    plan.region.add(cont.region.x0, cont.region.y0, 0);
+    plan.region.add(cont.region.x1, cont.region.y1, 0);
+    plan.strokes.extend(cont.strokes);
+    plan.next_y = cont.next_y;
 }
 
 /// Splice a streamed continuation chunk into a running write animation.
