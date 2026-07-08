@@ -118,7 +118,23 @@ fn oracle_test(png: &str) -> i32 {
 }
 
 fn run() -> std::io::Result<()> {
-    let font = FontRef::try_from_slice(FONT_TTF).map_err(std::io::Error::other)?;
+    // The reply hand: RIDDLE_FONT_FILE (any TTF/OTF next to the binary or an
+    // absolute path), else the embedded Dancing Script. Loaded once and
+    // leaked — one font per process lifetime.
+    let font_bytes: &'static [u8] = match std::env::var("RIDDLE_FONT_FILE") {
+        Ok(p) => match std::fs::read(&p) {
+            Ok(b) => {
+                eprintln!("riddle: reply font {p}");
+                Box::leak(b.into_boxed_slice())
+            }
+            Err(e) => {
+                eprintln!("riddle: font {p} unreadable ({e}); using Dancing Script");
+                FONT_TTF
+            }
+        },
+        Err(_) => FONT_TTF,
+    };
+    let font = FontRef::try_from_slice(font_bytes).map_err(std::io::Error::other)?;
 
     let (disp, mut surf) = display::Display::open()?;
     let takeover = matches!(disp, display::Display::Quill);
@@ -191,8 +207,16 @@ fn run() -> std::io::Result<()> {
     let flush_every =
         if takeover { Duration::from_millis(8) } else { env_ms("RIDDLE_FLUSH_MS", 12) };
     // How long the pen must rest before the diary drinks the page. Raise it
-    // if it fires mid-thought while you pause (RIDDLE_IDLE_MS).
+    // if it fires mid-thought while you pause; set 0 to disable auto-send
+    // entirely (the send rule is then the only trigger). (RIDDLE_IDLE_MS)
     let idle_commit = env_ms("RIDDLE_IDLE_MS", 2800);
+    // Reply pen width: thicker ink reads darker on fast e-ink waveforms.
+    let reply_w: i32 = std::env::var("RIDDLE_REPLY_WIDTH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4);
+    // Deliberate send: latched when the user draws the send rule.
+    let mut send_now = false;
 
     eprintln!("riddle: the diary is open");
 
@@ -270,6 +294,9 @@ fn run() -> std::io::Result<()> {
                         last_footstep = None;
                         if let State::Listening { ref mut last_pen } = state {
                             *last_pen = Some(Instant::now());
+                            if absorb_send_rule(&mut user_ink, &mut surf, &disp) {
+                                send_now = true;
+                            }
                         }
                     }
                     continue;
@@ -347,6 +374,9 @@ fn run() -> std::io::Result<()> {
                         last_footstep = None;
                         if let State::Listening { ref mut last_pen } = state {
                             *last_pen = Some(Instant::now());
+                            if absorb_send_rule(&mut user_ink, &mut surf, &disp) {
+                                send_now = true;
+                            }
                         }
                     }
                 }
@@ -365,7 +395,13 @@ fn run() -> std::io::Result<()> {
         // ---- state machine ----
         state = match state {
             State::Listening { last_pen } => match last_pen {
-                Some(t) if !pen_down && t.elapsed() >= idle_commit && !user_ink.is_empty() => {
+                Some(t)
+                    if !pen_down
+                        && (send_now
+                            || (!idle_commit.is_zero() && t.elapsed() >= idle_commit))
+                        && !user_ink.is_empty() =>
+                {
+                    send_now = false;
                     if help::looks_like_question_mark(user_ink.stroke_list()) {
                         // Absorb the "?" and open the guide instead of asking.
                         let (qx, qy, qw, qh) = user_ink.bbox.rect();
@@ -488,11 +524,11 @@ fn run() -> std::io::Result<()> {
                         let (x, y) = stroke[plan.point_i];
                         if plan.point_i > 0 {
                             let (px, py) = stroke[plan.point_i - 1];
-                            surf.brush_line(px, py, x, y, 2, BLACK);
+                            surf.brush_line(px, py, x, y, reply_w, BLACK);
                         } else {
-                            surf.stamp(x, y, 2, BLACK);
+                            surf.stamp(x, y, reply_w, BLACK);
                         }
-                        dirty.add(x, y, 4);
+                        dirty.add(x, y, reply_w + 2);
                         plan.point_i += 1;
                         budget -= 1;
                     }
@@ -563,6 +599,38 @@ fn run() -> std::io::Result<()> {
     eprintln!("riddle: the diary closes");
     disp.terminate();
     Ok(())
+}
+
+/// If the most recent stroke is the "send rule" (a long flat line ruled under
+/// the words, like signing off a diary entry), absorb it — erase it from the
+/// page and drop it from the ink — and report that the user asked to send.
+/// The rule must span ~60% of the width of what's written (short note, short
+/// rule), with an absolute floor so a stray dash under one word doesn't send.
+fn absorb_send_rule(ink: &mut ink::Ink, surf: &mut Surface, disp: &display::Display) -> bool {
+    let strokes = ink.stroke_list();
+    if strokes.len() < 2 {
+        return false;
+    }
+    let mut text = BBox::empty();
+    for s in &strokes[..strokes.len() - 1] {
+        for &(x, y, r) in s {
+            text.add(x, y, r);
+        }
+    }
+    let text_w = (text.x1 - text.x0).max(0);
+    let min_w = (text_w * 3 / 5).max(SCREEN_W as i32 * 3 / 20);
+    let is_rule = strokes.last().is_some_and(|s| help::looks_like_send_rule(s, min_w));
+    if !is_rule {
+        return false;
+    }
+    if let Some(gone) = ink.pop_stroke() {
+        let (x, y, w, h) = gone.rect();
+        surf.fill_rect(x.max(0) as usize, y.max(0) as usize, w as usize, h as usize, WHITE);
+        disp.update(x, y, w, h, true);
+        eprintln!("riddle: send rule drawn");
+        return true;
+    }
+    false
 }
 
 fn should_stamp_footstep(last: Option<(i32, i32)>, x: i32, y: i32) -> bool {

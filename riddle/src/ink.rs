@@ -33,6 +33,26 @@ impl Ink {
         self.bbox = BBox::empty();
     }
 
+    /// Remove the most recent finished stroke (an absorbed gesture) and return
+    /// its bounding box. The ink bbox is rebuilt from what remains.
+    pub fn pop_stroke(&mut self) -> Option<BBox> {
+        let s = self.strokes.pop()?;
+        let mut gone = BBox::empty();
+        for &(x, y, r) in &s {
+            gone.add(x, y, r + 2);
+        }
+        self.bbox = BBox::empty();
+        for st in &self.strokes {
+            for &(x, y, r) in st {
+                self.bbox.add(x, y, r + 2);
+            }
+        }
+        for &(x, y, r) in &self.current {
+            self.bbox.add(x, y, r + 2);
+        }
+        Some(gone)
+    }
+
     /// Pen touched down or moved while down, with brush radius already
     /// resolved by the caller. Returns the dirty rect of what was drawn.
     pub fn pen_point(&mut self, surf: &mut Surface, x: i32, y: i32, r: i32) -> BBox {

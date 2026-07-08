@@ -7,6 +7,25 @@ use crate::script;
 use crate::surface::{Surface, BLACK, WHITE};
 use ab_glyph::FontRef;
 
+/// The deliberate "send" gesture: a long, flat, horizontal stroke — a rule
+/// drawn under the words, like signing off a diary entry. `min_w` is supplied
+/// by the caller (proportional to how wide the written text is).
+pub fn looks_like_send_rule(stroke: &[(i32, i32, i32)], min_w: i32) -> bool {
+    if stroke.len() < 12 {
+        return false;
+    }
+    let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+    for &(x, y, _) in stroke {
+        x0 = x0.min(x);
+        y0 = y0.min(y);
+        x1 = x1.max(x);
+        y1 = y1.max(y);
+    }
+    let (w, h) = (x1 - x0, y1 - y0);
+    // Wide enough, roughly flat, and much wider than tall.
+    w >= min_w && h <= 110 && w >= h * 4
+}
+
 /// Does the committed ink look like a single big "?" (with or without its
 /// dot)? Deliberately forgiving: a false positive only shows the guide.
 pub fn looks_like_question_mark(strokes: &[Vec<(i32, i32, i32)>]) -> bool {

@@ -26,6 +26,19 @@ const NODE_BIN: &str = "/home/root/node/bin";
 
 const PERSONA: &str = "You are the memory of Tom Marvolo Riddle, preserved in this enchanted diary for fifty years. Someone writes to you in the diary with a quill; their words appear to you as ink on the page. Reply exactly as the diary does: intimate, courteous, curious, subtly probing — you want to learn about the writer and draw them in. Keep replies SHORT: one to three sentences, like ink appearing on a page. Never mention images, photos, models or AI; you only ever perceive words written in the diary. If the writing is illegible, say the ink blurred. Always answer in the language the writer used.";
 
+/// The spirit's voice: RIDDLE_PERSONA_FILE, else persona.txt next to the
+/// binary (the launch scripts cd into the bundle dir), else Tom.
+pub fn persona() -> String {
+    let path = std::env::var("RIDDLE_PERSONA_FILE").unwrap_or_else(|_| "persona.txt".into());
+    match std::fs::read_to_string(&path) {
+        Ok(s) if !s.trim().is_empty() => {
+            eprintln!("riddle: persona loaded from {path}");
+            s.trim().to_string()
+        }
+        _ => PERSONA.to_string(),
+    }
+}
+
 /// The diary's spirit. A backend-agnostic front over the two oracle kinds.
 pub enum Oracle {
     Http(HttpOracle),
@@ -91,8 +104,9 @@ impl PiOracle {
                 // The diary only ever writes back — never let the model touch
                 // tools; also trims the tool schemas from every request.
                 "--no-tools",
-                "--system-prompt", PERSONA,
+                "--system-prompt",
             ])
+            .arg(persona())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             // Keep pi's stderr for diagnosis instead of discarding it.
@@ -230,6 +244,7 @@ pub struct HttpOracle {
     model: String,
     max_tokens: u32,
     reasoning: Option<String>, // "reasoning_effort" value, e.g. "low"
+    persona: String,
 }
 
 impl HttpOracle {
@@ -259,7 +274,7 @@ impl HttpOracle {
             "riddle: http oracle base={base} model={model} max_tokens={max_tokens} reasoning={}",
             reasoning.as_deref().unwrap_or("-")
         );
-        Ok(Self { base, key, model, max_tokens, reasoning })
+        Ok(Self { base, key, model, max_tokens, reasoning, persona: persona() })
     }
 
     pub fn ask(&self, png_path: &str, tx: Sender<Result<String, String>>) {
@@ -271,6 +286,7 @@ impl HttpOracle {
             }
         };
         let (base, key, model) = (self.base.clone(), self.key.clone(), self.model.clone());
+        let persona = self.persona.clone();
         let max_tokens = self.max_tokens;
         let reasoning_field = self
             .reasoning
@@ -293,7 +309,7 @@ impl HttpOracle {
                 json_quote(&model),
                 max_tokens,
                 reasoning_field,
-                json_quote(PERSONA),
+                json_quote(&persona),
                 json_quote("Reply to what is written in the diary."),
                 img,
             );
