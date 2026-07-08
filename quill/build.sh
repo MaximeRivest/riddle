@@ -24,13 +24,13 @@ QTINC="$SDKTARGETSYSROOT/usr/include"
 $CXX -fPIC -shared -O2 \
     -I "$QTINC" -I "$QTINC/QtCore" -I "$QTINC/QtGui" \
     src/epfb.cpp src/quill_c.cpp \
-    -L vendor -lqsgepaper \
+    -L vendor -lqsgepaper -ldl \
     -o build/libquill.so
 
 # scribble: the C1 latency demo.
 $CC -O2 src/scribble.c \
     -L build -lquill \
-    -L vendor -lqsgepaper \
+    -L vendor -lqsgepaper -ldl \
     -lQt6Gui -lQt6Core -lstdc++ \
     -Wl,-rpath,/home/root/quill \
     -o build/scribble
@@ -38,7 +38,7 @@ $CC -O2 src/scribble.c \
 # map_demo: static full-screen map + tiny partial-update footsteps.
 $CC -O2 src/map_demo.c \
     -L build -lquill \
-    -L vendor -lqsgepaper \
+    -L vendor -lqsgepaper -ldl \
     -lQt6Gui -lQt6Core -lstdc++ \
     -Wl,-rpath,/home/root/quill \
     -o build/map_demo
@@ -48,7 +48,7 @@ $CXX -O2 \
     -I "$QTINC" -I "$QTINC/QtCore" -I "$QTINC/QtGui" \
     src/image_demo.cpp \
     -L build -lquill \
-    -L vendor -lqsgepaper \
+    -L vendor -lqsgepaper -ldl \
     -lQt6Gui -lQt6Core -lstdc++ \
     -Wl,-rpath,/home/root/quill \
     -o build/image_demo
@@ -58,7 +58,7 @@ $CXX -O2 \
     -I "$QTINC" -I "$QTINC/QtCore" -I "$QTINC/QtGui" \
     src/image_anim_demo.cpp \
     -L build -lquill \
-    -L vendor -lqsgepaper \
+    -L vendor -lqsgepaper -ldl \
     -lQt6Gui -lQt6Core -lstdc++ \
     -Wl,-rpath,/home/root/quill \
     -o build/image_anim_demo
@@ -68,7 +68,7 @@ $CXX -O2 \
     -I "$QTINC" -I "$QTINC/QtCore" -I "$QTINC/QtGui" \
     src/gif_demo.cpp \
     -L build -lquill \
-    -L vendor -lqsgepaper \
+    -L vendor -lqsgepaper -ldl \
     -lQt6Gui -lQt6Core -lstdc++ \
     -Wl,-rpath,/home/root/quill \
     -o build/gif_demo
@@ -76,7 +76,7 @@ $CXX -O2 \
 # drawlab: no-AI live drawing experiments.
 $CC -O2 src/drawlab.c \
     -L build -lquill \
-    -L vendor -lqsgepaper \
+    -L vendor -lqsgepaper -ldl \
     -lQt6Gui -lQt6Core -lstdc++ \
     -Wl,-rpath,/home/root/quill \
     -o build/drawlab
@@ -86,7 +86,7 @@ $CXX -O2 \
     -I "$QTINC" -I "$QTINC/QtCore" -I "$QTINC/QtGui" \
     src/home.cpp \
     -L build -lquill \
-    -L vendor -lqsgepaper \
+    -L vendor -lqsgepaper -ldl \
     -lQt6Gui -lQt6Core -lstdc++ \
     -Wl,-rpath,/home/root/quill \
     -o build/home
