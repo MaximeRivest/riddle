@@ -156,7 +156,9 @@ fn find_marker_device() -> io::Result<String> {
     for i in 0..8 {
         let name_path = format!("/sys/class/input/event{i}/device/name");
         if let Ok(name) = std::fs::read_to_string(&name_path) {
-            if name.to_lowercase().contains("marker") {
+            let n = name.to_lowercase();
+            // Paper Pro: "...marker". reMarkable 2: "Wacom I2C Digitizer".
+            if n.contains("marker") || n.contains("wacom") || n.contains("digitizer") {
                 return Ok(format!("/dev/input/event{i}"));
             }
         }

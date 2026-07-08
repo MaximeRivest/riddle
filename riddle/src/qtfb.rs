@@ -107,11 +107,21 @@ impl QtfbClient {
                 "qtfb server rejected init (no reply)",
             ));
         }
-        let shm_key = i32::from_le_bytes(reply[8..12].try_into().unwrap());
-        let shm_size = u64::from_le_bytes(reply[16..24].try_into().unwrap()) as usize;
+        // ServerMessage layout on the reMarkable 2 AppLoad shim (verified
+        // empirically with a probe against /tmp/qtfb.sock, and matching the
+        // canonical zqtfb client): a u8 type tag at byte 0, then — after the
+        // i32 alignment padding of the InitResponse struct — shm_key: i32 @4
+        // and shm_size @8. (The old Paper Pro code read @8/@16, which on this
+        // shim picked up the size as the key and got a nonexistent
+        // /qtfb_<size> name -> ENOENT.)
+        let shm_key = i32::from_le_bytes(reply[4..8].try_into().unwrap());
+        let shm_size = u32::from_le_bytes(reply[8..12].try_into().unwrap()) as usize;
 
-        let shm_path = format!("/dev/shm/qtfb_{}\0", shm_key);
-        let shm_fd = unsafe { libc::open(shm_path.as_ptr() as *const libc::c_char, libc::O_RDWR) };
+        // zqtfb opens the buffer with shm_open("/qtfb_<key>", O_RDWR).
+        let posix_name = format!("/qtfb_{}\0", shm_key);
+        let shm_fd = unsafe {
+            libc::shm_open(posix_name.as_ptr() as *const libc::c_char, libc::O_RDWR, 0)
+        };
         if shm_fd < 0 {
             let e = io::Error::last_os_error();
             unsafe { libc::close(fd) };
@@ -232,13 +242,17 @@ impl QtfbClient {
                 }
                 return Err(e);
             }
-            if buf[0] == MESSAGE_USERINPUT && n >= 28 {
+            if buf[0] == MESSAGE_USERINPUT && n >= 24 {
+                // zqtfb ServerMessage: type u8 @0, then (i32-aligned) union
+                // Input { type:i32 @4, device_id:i32 @8, x:i32 @12, y:i32 @16,
+                // d:i32 @20 }. The old Paper Pro offsets (@8/@12/@16/@20/@24)
+                // were shifted by 4 and produced garbage coords -> no ink.
                 out.push(InputEvent {
-                    input_type: i32::from_le_bytes(buf[8..12].try_into().unwrap()),
-                    dev_id: i32::from_le_bytes(buf[12..16].try_into().unwrap()),
-                    x: i32::from_le_bytes(buf[16..20].try_into().unwrap()),
-                    y: i32::from_le_bytes(buf[20..24].try_into().unwrap()),
-                    d: i32::from_le_bytes(buf[24..28].try_into().unwrap()),
+                    input_type: i32::from_le_bytes(buf[4..8].try_into().unwrap()),
+                    dev_id: i32::from_le_bytes(buf[8..12].try_into().unwrap()),
+                    x: i32::from_le_bytes(buf[12..16].try_into().unwrap()),
+                    y: i32::from_le_bytes(buf[16..20].try_into().unwrap()),
+                    d: i32::from_le_bytes(buf[20..24].try_into().unwrap()),
                 });
             }
         }
