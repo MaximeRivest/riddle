@@ -8,10 +8,11 @@
 use std::io;
 use std::os::fd::RawFd;
 
-// Digitizer axis ranges on the Paper Pro ("Elan marker input").
-const DIGI_MAX_X: i32 = 11180;
-const DIGI_MAX_Y: i32 = 15340;
 pub const MAX_PRESSURE: i32 = 4096;
+
+// EVIOCGABS ioctl: read absolute axis info (struct input_absinfo).
+const EVIOCGABS_X: libc::c_ulong = 0x80184540; // _IOR('E', 0x40 + ABS_X, struct input_absinfo)
+const EVIOCGABS_Y: libc::c_ulong = 0x80184541; // _IOR('E', 0x40 + ABS_Y, struct input_absinfo)
 
 const EV_SYN: u16 = 0;
 const EV_KEY: u16 = 1;
@@ -47,6 +48,8 @@ pub struct PenDevice {
     fd: RawFd,
     sw: i32,
     sh: i32,
+    digi_max_x: i32,
+    digi_max_y: i32,
     // Accumulated state between SYN_REPORTs.
     raw_x: i32,
     raw_y: i32,
@@ -65,15 +68,23 @@ impl PenDevice {
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
+        // Read actual digitizer axis ranges — they differ between devices
+        // (e.g. Paper Pro: 11180×15340, Paper Pro Move: 6760×11960).
+        let digi_max_x = read_abs_max(fd, EVIOCGABS_X).unwrap_or(11180);
+        let digi_max_y = read_abs_max(fd, EVIOCGABS_Y).unwrap_or(15340);
+
         let grab = unsafe { libc::ioctl(fd, EVIOCGRAB, 1i32) };
         if grab != 0 {
             eprintln!("riddle: warning: EVIOCGRAB failed ({}) — xochitl will also see the pen", io::Error::last_os_error());
         }
-        eprintln!("riddle: pen device {path} opened (grabbed: {})", grab == 0);
+        eprintln!("riddle: pen device {path} opened (grabbed: {}, digi {}x{})",
+            grab == 0, digi_max_x, digi_max_y);
         Ok(Self {
             fd,
             sw: sw as i32,
             sh: sh as i32,
+            digi_max_x,
+            digi_max_y,
             raw_x: 0,
             raw_y: 0,
             pressure: 0,
@@ -129,8 +140,8 @@ impl PenDevice {
                         if self.dirty {
                             self.dirty = false;
                             out.push(PenSample {
-                                x: self.raw_x * (self.sw - 1) / DIGI_MAX_X,
-                                y: self.raw_y * (self.sh - 1) / DIGI_MAX_Y,
+                                x: self.raw_x * (self.sw - 1) / self.digi_max_x,
+                                y: self.raw_y * (self.sh - 1) / self.digi_max_y,
                                 pressure: self.pressure,
                                 tool: self.tool,
                                 touching: self.touching,
@@ -152,6 +163,14 @@ impl Drop for PenDevice {
             libc::close(self.fd);
         }
     }
+}
+
+/// Read the maximum value of an ABS axis via EVIOCGABS ioctl.
+/// struct input_absinfo: value(i32), minimum(i32), maximum(i32), fuzz(i32), flat(i32), resolution(i32)
+fn read_abs_max(fd: RawFd, ioctl_code: libc::c_ulong) -> Option<i32> {
+    let mut buf = [0i32; 6];
+    let ret = unsafe { libc::ioctl(fd, ioctl_code, buf.as_mut_ptr()) };
+    if ret == 0 && buf[2] > 0 { Some(buf[2]) } else { None }
 }
 
 fn find_marker_device() -> io::Result<String> {
