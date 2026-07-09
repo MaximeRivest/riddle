@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use ab_glyph::FontRef;
 
-use fb::{BBox, SCREEN_H, SCREEN_W};
+use fb::BBox;
 use oracle::Event;
 use surface::{Surface, BLACK, FADED, WHITE};
 
@@ -191,7 +191,7 @@ fn run() -> std::io::Result<()> {
         surf.stride
     );
 
-    let mut pen_dev = match pen::PenDevice::open() {
+    let mut pen_dev = match pen::PenDevice::open(sw, sh) {
         Ok(p) => Some(p),
         Err(e) => {
             eprintln!("riddle: raw pen unavailable ({e}), falling back to qtfb pen events");
@@ -214,8 +214,11 @@ fn run() -> std::io::Result<()> {
     signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&sigterm))?;
     signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&sigterm))?;
 
+    let sw = surf.w;
+    let sh = surf.h;
+
     // Blank page.
-    surf.fill_rect(0, 0, SCREEN_W, SCREEN_H, WHITE);
+    surf.fill_rect(0, 0, sw, sh, WHITE);
     disp.update_all(surf.w, surf.h);
 
     // The diary's memory (None = RIDDLE_MEMORY=off or the dir is unusable).
@@ -276,7 +279,7 @@ fn run() -> std::io::Result<()> {
             let pressed = p.drain_pressed();
             if pressed && Instant::now() >= power_grace {
                 eprintln!("riddle: sleeping (power button)");
-                let saved = help::show_sleep(&mut surf, &font);
+                let saved = help::show_sleep(&mut surf, &font, sw, sh);
                 disp.full_refresh(surf.w, surf.h);
                 // Let the flashing refresh finish before the panel loses power.
                 std::thread::sleep(Duration::from_millis(800));
@@ -305,7 +308,7 @@ fn run() -> std::io::Result<()> {
                     eprintln!("riddle: suspend aborted (EPD discharge timer), retrying");
                 }
                 eprintln!("riddle: waking");
-                help::restore_sleep(&mut surf, &saved);
+                help::restore_sleep(&mut surf, &saved, sw, sh);
                 disp.full_refresh(surf.w, surf.h);
                 power::wifi_heal();
                 // Discard input that queued while asleep — stale pen events
@@ -424,7 +427,7 @@ fn run() -> std::io::Result<()> {
                         surf.fill_rect(qx as usize, qy as usize, qw as usize, qh as usize, WHITE);
                         disp.update(qx, qy, qw, qh, false);
                         user_ink.clear();
-                        let panel = help::show(&mut surf, &font, takeover);
+                        let panel = help::show(&mut surf, &font, takeover, sw, sh);
                         let (px, py, pw, ph) = panel.region.rect();
                         disp.update(px, py, pw, ph, false);
                         eprintln!("riddle: guide shown");
@@ -432,8 +435,8 @@ fn run() -> std::io::Result<()> {
                     } else if oracle.is_none() {
                         // No spirit at all: don't eat ink that nothing will
                         // answer — leave the writing and put the reason below.
-                        let y = (user_ink.bbox.y1 + 90).min(SCREEN_H as i32 - 400);
-                        let plan = plan_reply(&font, &oracle_excuse("no oracle"), Some(y));
+                        let y = (user_ink.bbox.y1 + 90).min(sh as i32 - 400);
+                        let plan = plan_reply(&font, &oracle_excuse("no oracle"), Some(y), sw, sh);
                         State::Replying { plan, next: Instant::now(), rx: None }
                     } else {
                         if let Err(e) = user_ink.to_png(&surf, PNG_PATH) {
@@ -486,19 +489,19 @@ fn run() -> std::io::Result<()> {
 
             State::Thinking { rx, pulse, blot_on, since } => match rx.try_recv() {
                 Ok(result) => {
-                    surf.fill_rect(SCREEN_W / 2 - 14, SCREEN_H / 2 - 14, 28, 28, WHITE);
-                    disp.update(SCREEN_W as i32 / 2 - 14, SCREEN_H as i32 / 2 - 14, 28, 28, true);
+                    surf.fill_rect(sw / 2 - 14, sh / 2 - 14, 28, 28, WHITE);
+                    disp.update(sw as i32 / 2 - 14, sh as i32 / 2 - 14, 28, 28, true);
                     // First streamed event: start writing now; keep the
                     // receiver so the rest of the reply can append itself.
                     match result {
                         Ok(Event::Show(id)) => {
                             // An incantation: the rest of this turn is the
                             // conjured memory, not a reply. (rx drops here.)
-                            match conjure(&font, &store, id, &mut surf, &disp) {
+                            match conjure(&font, &store, id, &mut surf, &disp, sw, sh) {
                                 Some(st) => st,
                                 None => {
                                     eprintln!("riddle: memory {id} is missing");
-                                    let plan = plan_reply(&font, &oracle_excuse("lost page"), None);
+                                    let plan = plan_reply(&font, &oracle_excuse("lost page"), None, sw, sh);
                                     turn_failed = true;
                                     State::Replying { plan, next: Instant::now(), rx: None }
                                 }
@@ -506,7 +509,7 @@ fn run() -> std::io::Result<()> {
                         }
                         Ok(Event::Ink(text)) => {
                             turn_reply.push_str(&text);
-                            let plan = plan_reply(&font, &text, None);
+                            let plan = plan_reply(&font, &text, None, sw, sh);
                             State::Replying { plan, next: Instant::now(), rx: Some(rx) }
                         }
                         Ok(Event::Transcript(t)) => {
@@ -518,7 +521,7 @@ fn run() -> std::io::Result<()> {
                         Err(e) => {
                             eprintln!("riddle: oracle failed: {e}");
                             turn_failed = true;
-                            let plan = plan_reply(&font, &oracle_excuse(&e), None);
+                            let plan = plan_reply(&font, &oracle_excuse(&e), None, sw, sh);
                             State::Replying { plan, next: Instant::now(), rx: None }
                         }
                     }
@@ -528,12 +531,12 @@ fn run() -> std::io::Result<()> {
                         // The oracle never answered (stalled stream, dead pi):
                         // stop pulsing and say so instead of thinking forever.
                         eprintln!("riddle: oracle timed out after {}s", ORACLE_PATIENCE.as_secs());
-                        surf.fill_rect(SCREEN_W / 2 - 14, SCREEN_H / 2 - 14, 28, 28, WHITE);
-                        disp.update(SCREEN_W as i32 / 2 - 14, SCREEN_H as i32 / 2 - 14, 28, 28, true);
-                        let plan = plan_reply(&font, &oracle_excuse("timed out"), None);
+                        surf.fill_rect(sw / 2 - 14, sh / 2 - 14, 28, 28, WHITE);
+                        disp.update(sw as i32 / 2 - 14, sh as i32 / 2 - 14, 28, 28, true);
+                        let plan = plan_reply(&font, &oracle_excuse("timed out"), None, sw, sh);
                         State::Replying { plan, next: Instant::now(), rx: None }
                     } else if pulse.elapsed() >= Duration::from_millis(600) {
-                        let (cx, cy) = (SCREEN_W as i32 / 2, SCREEN_H as i32 / 2);
+                        let (cx, cy) = (sw as i32 / 2, sh as i32 / 2);
                         if blot_on {
                             surf.fill_rect(cx as usize - 14, cy as usize - 14, 28, 28, WHITE);
                         } else {
@@ -554,7 +557,7 @@ fn run() -> std::io::Result<()> {
                 if let Some(ref r) = rx {
                     let drop_rx = match r.try_recv() {
                         Ok(Ok(Event::Ink(more))) => {
-                            if plan.next_y > SCREEN_H as i32 - 200 {
+                            if plan.next_y > sh as i32 - 200 {
                                 // The page is full: let the rest go unwritten
                                 // rather than inking below the visible page.
                                 eprintln!("riddle: reply reached the page bottom; trailing text dropped");
@@ -562,7 +565,7 @@ fn run() -> std::io::Result<()> {
                             } else {
                                 turn_reply.push_str(" ");
                                 turn_reply.push_str(&more);
-                                append_reply(&font, &mut plan, &more);
+                                append_reply(&font, &mut plan, &more, sw, sh);
                                 false
                             }
                         }
@@ -664,7 +667,7 @@ fn run() -> std::io::Result<()> {
             State::Conjuring { mut plan, next, saved } => {
                 if stylus_tapped {
                     // The writer interrupts: today's page returns at once.
-                    surf.paste_rect(0, 0, SCREEN_W, SCREEN_H, &saved);
+                    surf.paste_rect(0, 0, sw, sh, &saved);
                     disp.full_refresh(surf.w, surf.h);
                     State::MemoryShown { saved: None, until: Instant::now(), region: plan.region }
                 } else if Instant::now() >= next {
@@ -713,7 +716,7 @@ fn run() -> std::io::Result<()> {
                 Some(s) => {
                     if stylus_tapped || Instant::now() >= until {
                         // The paper swallows its memory; today's page returns.
-                        surf.paste_rect(0, 0, SCREEN_W, SCREEN_H, &s);
+                        surf.paste_rect(0, 0, sw, sh, &s);
                         disp.full_refresh(surf.w, surf.h);
                         eprintln!("riddle: memory dismissed");
                         State::MemoryShown { saved: None, until, region }
@@ -798,14 +801,16 @@ fn conjure(
     id: u64,
     surf: &mut Surface,
     disp: &display::Display,
+    sw: usize,
+    sh: usize,
 ) -> Option<State> {
     let s = store.as_ref()?;
     let entry = s.get(id)?.clone();
     let strokes = s.strokes(id).unwrap_or_default();
     eprintln!("riddle: conjuring memory {id} ({})", memory::spoken_date(id));
 
-    let saved = surf.copy_rect(0, 0, SCREEN_W, SCREEN_H);
-    surf.fill_rect(0, 0, SCREEN_W, SCREEN_H, WHITE);
+    let saved = surf.copy_rect(0, 0, sw, sh);
+    surf.fill_rect(0, 0, sw, sh, WHITE);
     disp.update_all(surf.w, surf.h);
 
     let mut all: Vec<Vec<(i32, i32, i32)>> = Vec::new();
@@ -815,7 +820,7 @@ fn conjure(
     let date = memory::spoken_date(entry.id);
     let mut raster = script::rasterize_line(font, &date, 54.0);
     script::thin(&mut raster);
-    let x0 = (SCREEN_W as i32 - raster.width as i32) / 2;
+    let x0 = (sw as i32 - raster.width as i32) / 2;
     let mut ink_bottom = 64;
     for stroke in script::trace(&raster) {
         let mapped: Vec<(i32, i32, i32)> =
@@ -838,8 +843,8 @@ fn conjure(
 
     // Tom's old reply, below.
     if !entry.reply.is_empty() {
-        let y = (ink_bottom + 130).min(SCREEN_H as i32 - 400);
-        let reply = plan_reply(font, &entry.reply, Some(y));
+        let y = (ink_bottom + 130).min(sh as i32 - 400);
+        let reply = plan_reply(font, &entry.reply, Some(y), sw, sh);
         for stroke in reply.strokes {
             let mapped: Vec<(i32, i32, i32)> = stroke.iter().map(|&(x, y)| (x, y, 2)).collect();
             for &(x, y, r) in &mapped {
@@ -858,12 +863,12 @@ fn conjure(
 
 /// Lay out reply text and produce screen-space strokes. `y_start` continues a
 /// streamed reply below its previous chunk; None places the first chunk.
-fn plan_reply(font: &FontRef, text: &str, y_start: Option<i32>) -> WritePlan {
-    let max_w = (SCREEN_W as i32 - 2 * MARGIN_X) as f32;
+fn plan_reply(font: &FontRef, text: &str, y_start: Option<i32>, sw: usize, sh: usize) -> WritePlan {
+    let max_w = (sw as i32 - 2 * MARGIN_X) as f32;
     let lines = script::wrap(font, text, REPLY_PX, max_w);
     let line_h = (REPLY_PX * 1.25) as i32;
     let total_h = line_h * lines.len() as i32;
-    let mut y = y_start.unwrap_or(((SCREEN_H as i32 - total_h) / 3).max(60));
+    let mut y = y_start.unwrap_or(((sh as i32 - total_h) / 3).max(60));
     let mut strokes = Vec::new();
     let mut region = BBox::empty();
     let mut seed = 0x1234u32;
@@ -876,7 +881,7 @@ fn plan_reply(font: &FontRef, text: &str, y_start: Option<i32>) -> WritePlan {
         let mut raster = script::rasterize_line(font, line_text, REPLY_PX);
         script::thin(&mut raster);
         let line_strokes = script::trace(&raster);
-        let x0 = (SCREEN_W as i32 - raster.width as i32) / 2;
+        let x0 = (sw as i32 - raster.width as i32) / 2;
         let wobble = jitter();
         for s in line_strokes {
             let mapped: Vec<(i32, i32)> = s.iter().map(|&(sx, sy)| (x0 + sx, y + sy + wobble)).collect();
@@ -892,8 +897,8 @@ fn plan_reply(font: &FontRef, text: &str, y_start: Option<i32>) -> WritePlan {
 }
 
 /// Splice a streamed continuation chunk into a running write animation.
-fn append_reply(font: &FontRef, plan: &mut WritePlan, more: &str) {
-    let cont = plan_reply(font, more, Some(plan.next_y));
+fn append_reply(font: &FontRef, plan: &mut WritePlan, more: &str, sw: usize, sh: usize) {
+    let cont = plan_reply(font, more, Some(plan.next_y), sw, sh);
     if cont.strokes.is_empty() {
         return;
     }
