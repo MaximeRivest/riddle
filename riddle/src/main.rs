@@ -183,11 +183,13 @@ fn run() -> std::io::Result<()> {
 
     let (disp, mut surf) = display::Display::open()?;
     let takeover = matches!(disp, display::Display::Quill);
+    let sw = surf.w;
+    let sh = surf.h;
     eprintln!(
         "riddle: display {} ({}x{} stride {})",
         if takeover { "quill/takeover" } else { "qtfb" },
-        surf.w,
-        surf.h,
+        sw,
+        sh,
         surf.stride
     );
 
@@ -213,9 +215,6 @@ fn run() -> std::io::Result<()> {
     let sigterm = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&sigterm))?;
     signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&sigterm))?;
-
-    let sw = surf.w;
-    let sh = surf.h;
 
     // Blank page.
     surf.fill_rect(0, 0, sw, sh, WHITE);
