@@ -31,7 +31,7 @@ use fb::BBox;
 use oracle::Event;
 use surface::{Surface, BLACK, FADED, WHITE};
 
-const FONT_TTF: &[u8] = include_bytes!("../fonts/DancingScript.ttf");
+const FONT_TTF: &[u8] = include_bytes!("../fonts/Caveat-Regular.ttf");
 const PNG_PATH: &str = "/tmp/riddle-page.png";
 
 const IDLE_COMMIT: Duration = Duration::from_millis(2800);
