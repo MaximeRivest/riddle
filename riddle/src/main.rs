@@ -191,12 +191,23 @@ fn run() -> std::io::Result<()> {
         surf.stride
     );
 
-    let mut pen_dev = match pen::PenDevice::open() {
-        Ok(p) => Some(p),
-        Err(e) => {
-            eprintln!("riddle: raw pen unavailable ({e}), falling back to qtfb pen events");
-            None
+    // Raw evdev pen only makes sense in takeover mode (we own the panel and
+    // xochitl is stopped). Under qtfb/AppLoad the shim intercepts the digitizer
+    // and delivers pen events over the QTFB socket instead of /dev/input — so
+    // grabbing the raw device there yields NO events and, worse, the event loop
+    // skips the qtfb pen path whenever pen_dev.is_some(). Only open raw in
+    // takeover; otherwise stay None and consume qtfb INPUT_PEN_* events.
+    let mut pen_dev = if takeover {
+        match pen::PenDevice::open() {
+            Ok(p) => Some(p),
+            Err(e) => {
+                eprintln!("riddle: raw pen unavailable ({e}), falling back to qtfb pen events");
+                None
+            }
         }
+    } else {
+        eprintln!("riddle: qtfb mode — using QTFB socket pen events");
+        None
     };
     // Takeover mode: touch is ours too; 5-finger tap = quit.
     let mut touch_dev = if takeover { touch::TouchDevice::open().ok() } else { None };
@@ -256,7 +267,10 @@ fn run() -> std::io::Result<()> {
     let mut ink_dirty = BBox::empty();
     let mut last_flush = Instant::now();
     // Takeover swaps are cheap and synchronous; qtfb needs coalescing.
-    let flush_every = if takeover { Duration::from_millis(8) } else { Duration::from_millis(35) };
+    // qtfb needs coalescing (each update is an IPC round-trip to the shim);
+    // 20ms (~50 Hz) keeps the stroke continuous without flooding the socket.
+    // Takeover writes straight to the panel and can afford 8ms.
+    let flush_every = if takeover { Duration::from_millis(8) } else { Duration::from_millis(20) };
 
     eprintln!("riddle: the diary is open");
 
@@ -371,6 +385,16 @@ fn run() -> std::io::Result<()> {
                 continue;
             }
             match ev.input_type {
+                // Quit gesture (qtfb/AppLoad only): a finger tap in the
+                // top-right corner closes the diary. Takeover mode uses the
+                // 5-finger tap instead; under AppLoad there is no touch device,
+                // so we give an easy, deliberate exit that the pen won't trip.
+                qtfb::INPUT_TOUCH_PRESS
+                    if ev.x >= SCREEN_W as i32 - 160 && ev.y <= 160 =>
+                {
+                    eprintln!("riddle: corner-tap quit");
+                    break;
+                }
                 qtfb::INPUT_PEN_PRESS | qtfb::INPUT_PEN_UPDATE => {
                     stylus_on = true;
                     stylus_tapped = true;
