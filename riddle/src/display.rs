@@ -7,6 +7,9 @@ use std::io;
 
 pub enum Display {
     Qtfb(crate::qtfb::QtfbClient),
+    /// Headless companion mode: xochitl owns the real panel while riddle
+    /// renders into this private RGB565 page for OCR and layout.
+    Xochitl(Box<[u8]>),
     #[allow(dead_code)]
     Quill,
 }
@@ -31,16 +34,34 @@ impl Display {
             let key: i32 = key.parse().map_err(io::Error::other)?;
             let mut client = crate::qtfb::QtfbClient::connect(
                 key,
-                crate::qtfb::FBFMT_RMPP_RGB565,
-                1620,
-                2160,
+                crate::qtfb::FBFMT_RM2FB,
+                crate::fb::SCREEN_W,
+                crate::fb::SCREEN_H,
                 2,
             )?;
             let _ = client.set_refresh_mode(crate::qtfb::REFRESH_MODE_UFAST);
             let buf = client.framebuffer();
             let (ptr, len) = (buf.as_mut_ptr(), buf.len());
-            let surface = Surface::new(ptr, len, 1620, 2160, 1620 * 2, PixFmt::Rgb565);
+            let surface = Surface::new(
+                ptr, len, crate::fb::SCREEN_W, crate::fb::SCREEN_H,
+                crate::fb::SCREEN_W * 2, PixFmt::Rgb565,
+            );
             return Ok((Display::Qtfb(client), surface));
+        }
+
+        // reMarkable 2 needs no launcher: keep the stock UI running and use
+        // its Wacom input path to replay Tom's generated handwriting.
+        #[cfg(not(feature = "takeover"))]
+        {
+            let mut page = vec![0xff; crate::fb::SCREEN_W * crate::fb::SCREEN_H * 2]
+                .into_boxed_slice();
+            let ptr = page.as_mut_ptr();
+            let len = page.len();
+            let surface = Surface::new(
+                ptr, len, crate::fb::SCREEN_W, crate::fb::SCREEN_H,
+                crate::fb::SCREEN_W * 2, PixFmt::Rgb565,
+            );
+            return Ok((Display::Xochitl(page), surface));
         }
 
         #[cfg(feature = "takeover")]
@@ -60,10 +81,6 @@ impl Display {
                 Ok((Display::Quill, surface))
             }
         }
-        #[cfg(not(feature = "takeover"))]
-        Err(io::Error::other(
-            "QTFB_KEY not set and this build has no takeover backend",
-        ))
     }
 
     /// Push a region to the panel. `fast` selects the low-latency waveform.
@@ -72,6 +89,7 @@ impl Display {
             Display::Qtfb(c) => {
                 let _ = c.update_partial(x, y, w, h);
             }
+            Display::Xochitl(_) => {}
             #[allow(unused_variables)]
             Display::Quill => {
                 #[cfg(feature = "takeover")]
@@ -89,6 +107,7 @@ impl Display {
             Display::Qtfb(c) => {
                 let _ = c.update_all();
             }
+            Display::Xochitl(_) => {}
             #[allow(unused_variables)]
             Display::Quill => {
                 #[cfg(feature = "takeover")]
@@ -107,6 +126,7 @@ impl Display {
             Display::Qtfb(c) => {
                 let _ = c.request_full_refresh();
             }
+            Display::Xochitl(_) => {}
             #[allow(unused_variables)]
             Display::Quill => {
                 #[cfg(feature = "takeover")]
@@ -124,6 +144,7 @@ impl Display {
     pub fn pump(&self) -> io::Result<Vec<crate::qtfb::InputEvent>> {
         match self {
             Display::Qtfb(c) => c.drain_events(),
+            Display::Xochitl(_) => Ok(Vec::new()),
             Display::Quill => {
                 #[cfg(feature = "takeover")]
                 unsafe {

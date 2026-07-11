@@ -3,7 +3,7 @@ name = "riddle"
 version = "0.3.0"
 edition = "2021"
 license = "MIT"
-description = "The diary of Tom Riddle, for the reMarkable Paper Pro"
+description = "The diary of Tom Riddle, ported to the reMarkable 2"
 
 [dependencies]
 libc = "0.2"

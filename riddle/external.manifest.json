@@ -1,8 +1,9 @@
 {
   "id": "riddle",
   "name": "The Diary",
-  "version": "0.3.0",
+  "version": "0.3.0-rm2.2",
   "description": "An enchanted diary: write to it with the pen — it writes back, and it remembers.",
-  "application": "appload-launch.sh",
-  "qtfb": false
+  "application": "appload-rm2.sh",
+  "qtfb": true,
+  "aspectRatio": "original"
 }

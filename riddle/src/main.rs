@@ -1,4 +1,4 @@
-//! riddle — the diary of Tom Riddle, for the reMarkable Paper Pro.
+//! riddle — the diary of Tom Riddle, for the reMarkable 2.
 //!
 //! Write on the page with the pen. After a pause the diary drinks your ink,
 //! and an answer writes itself onto the page in a flowing hand, then fades.
@@ -38,8 +38,8 @@ const IDLE_COMMIT: Duration = Duration::from_millis(2800);
 /// How long the diary waits on a silent oracle before giving up on the turn.
 /// Generous: thinking models can lead with a long silence.
 const ORACLE_PATIENCE: Duration = Duration::from_secs(120);
-const REPLY_PX: f32 = 96.0;
-const MARGIN_X: i32 = 120;
+const REPLY_PX: f32 = 82.0;
+const MARGIN_X: i32 = 100;
 
 const USAGE: &str = "\
 riddle — the diary of Tom Riddle
@@ -179,25 +179,65 @@ fn build_ctx(store: &Option<memory::MemoryStore>) -> oracle::TurnContext {
 }
 
 fn run() -> std::io::Result<()> {
-    let font = FontRef::try_from_slice(FONT_TTF).map_err(std::io::Error::other)?;
+    // Dancing Script has no CJK glyphs. RM2 bundles provide a Traditional
+    // Chinese font beside the executable; keep its bytes alive for FontRef.
+    // Resolve relative to the executable, not the CWD — AppLoad may launch
+    // the binary from an arbitrary working directory.
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(p) = std::env::var("RIDDLE_FONT") {
+        candidates.push(p.into());
+    } else {
+        for rel in ["NotoSansTC-VF.ttf", "fonts/NotoSansTC-VF.ttf"] {
+            if let Some(ref d) = exe_dir {
+                candidates.push(d.join(rel));
+            }
+            candidates.push(rel.into());
+        }
+    }
+    let external_font = candidates
+        .iter()
+        .find_map(|p| std::fs::read(p).ok().map(|b| (p.display().to_string(), b)));
+    let font = match external_font {
+        Some((ref path, ref bytes)) => match FontRef::try_from_slice(bytes) {
+            Ok(f) => {
+                eprintln!("riddle: reply font {path}");
+                f
+            }
+            Err(e) => {
+                // A truncated scp of the 12MB font must not brick the diary.
+                eprintln!("riddle: font {path} unusable ({e}); falling back to embedded Dancing Script");
+                FontRef::try_from_slice(FONT_TTF).map_err(std::io::Error::other)?
+            }
+        },
+        None => {
+            eprintln!("riddle: no CJK font found, falling back to embedded Dancing Script");
+            FontRef::try_from_slice(FONT_TTF).map_err(std::io::Error::other)?
+        }
+    };
 
     let (disp, mut surf) = display::Display::open()?;
     let takeover = matches!(disp, display::Display::Quill);
+    let xochitl = matches!(disp, display::Display::Xochitl(_));
+    if xochitl { std::env::set_var("RIDDLE_XOCHITL", "1"); }
     eprintln!(
         "riddle: display {} ({}x{} stride {})",
-        if takeover { "quill/takeover" } else { "qtfb" },
+        if takeover { "quill/takeover" } else if xochitl { "xochitl companion" } else { "qtfb" },
         surf.w,
         surf.h,
         surf.stride
     );
 
-    let mut pen_dev = match pen::PenDevice::open() {
+    let mut pen_dev = match pen::PenDevice::open(xochitl) {
         Ok(p) => Some(p),
         Err(e) => {
             eprintln!("riddle: raw pen unavailable ({e}), falling back to qtfb pen events");
             None
         }
     };
+    let reply_pen = if xochitl { Some(pen::PenWriter::open()?) } else { None };
     // Takeover mode: touch is ours too; 5-finger tap = quit.
     let mut touch_dev = if takeover { touch::TouchDevice::open().ok() } else { None };
     // Takeover mode: the power button is ours too (sleep page + suspend).
@@ -255,8 +295,19 @@ fn run() -> std::io::Result<()> {
     let mut stylus_tapped = false;
     let mut ink_dirty = BBox::empty();
     let mut last_flush = Instant::now();
+    // qtfb's UFAST waveform under-drives black on freshly-erased panel areas
+    // (faint grey strokes). DU-class waveforms are cumulative, so re-flushing
+    // the finished reply region a couple of times develops it to full black.
+    let mut reink: Option<(BBox, Instant, u8)> = None;
+    // Companion mode: while injecting a reply, a real pen near the panel
+    // pauses injection — interleaved streams on the shared Wacom device would
+    // scribble permanent ink across the user's notebook.
+    let mut pen_guard = Instant::now();
+    let mut pen_lifted = false;
     // Takeover swaps are cheap and synchronous; qtfb needs coalescing.
-    let flush_every = if takeover { Duration::from_millis(8) } else { Duration::from_millis(35) };
+    // 16ms (~60fps) is the sweet spot for qtfb: fast enough to feel responsive
+    // without saturating the qtfb socket queue.
+    let flush_every = if takeover { Duration::from_millis(8) } else { Duration::from_millis(16) };
 
     eprintln!("riddle: the diary is open");
 
@@ -324,6 +375,17 @@ fn run() -> std::io::Result<()> {
         // ---- raw pen (preferred path) ----
         if let Some(ref mut pdev) = pen_dev {
             for s in pdev.drain() {
+                // Companion mode, mid-reply: any sample away from our own
+                // injected point is the user's real pen (hover included) —
+                // pause injection so interleaved streams on the shared Wacom
+                // device don't scribble across the notebook.
+                if matches!(state, State::Replying { .. }) {
+                    if let Some(ref p) = reply_pen {
+                        if !p.near(s.x, s.y, 60) {
+                            pen_guard = Instant::now() + Duration::from_millis(1200);
+                        }
+                    }
+                }
                 let writing = s.touching && s.pressure > 40;
                 stylus_on = writing;
                 stylus_tapped |= writing;
@@ -354,7 +416,13 @@ fn run() -> std::io::Result<()> {
                         *last_pen = Some(Instant::now());
                     }
                     State::Lingering { region, .. } => {
-                        state = State::FadingReply { stage: 0, next: Instant::now(), region };
+                        // Skip loopback echoes of our own injected stroke:
+                        // the reply's final points arrive one drain later and
+                        // must not fade the reply the instant it finishes.
+                        let echo = reply_pen.as_ref().map_or(false, |p| p.near(s.x, s.y, 60));
+                        if !echo {
+                            state = State::FadingReply { stage: 0, next: Instant::now(), region };
+                        }
                     }
                     _ => {}
                 }
@@ -401,7 +469,7 @@ fn run() -> std::io::Result<()> {
             }
         }
 
-        // ---- coalesced ink flush ----
+        // ---- coalesced ink flush (catch-all for qtfb fallback pen path) ----
         if !ink_dirty.is_empty() && last_flush.elapsed() >= flush_every {
             let (x, y, w, h) = ink_dirty.rect();
             disp.update(x, y, w, h, true);
@@ -418,7 +486,7 @@ fn run() -> std::io::Result<()> {
                         // commit (and no phantom "?" from erased strokes).
                         user_ink.clear();
                         State::Listening { last_pen: None }
-                    } else if help::looks_like_question_mark(user_ink.stroke_list()) {
+                    } else if !xochitl && help::looks_like_question_mark(user_ink.stroke_list()) {
                         // Absorb the "?" and open the guide instead of asking.
                         let (qx, qy, qw, qh) = user_ink.bbox.rect();
                         surf.fill_rect(qx as usize, qy as usize, qw as usize, qh as usize, WHITE);
@@ -586,12 +654,20 @@ fn run() -> std::io::Result<()> {
                         rx = None;
                     }
                 }
-                if Instant::now() >= next {
+                if reply_pen.is_some() && Instant::now() < pen_guard {
+                    // Real pen near the panel: lift our pen and hold.
+                    if !pen_lifted {
+                        if let Some(ref p) = reply_pen { let _ = p.up(); }
+                        pen_lifted = true;
+                    }
+                    State::Replying { plan, next: Instant::now() + Duration::from_millis(120), rx }
+                } else if Instant::now() >= next {
                     let mut dirty = BBox::empty();
                     let mut budget = 26;
                     while budget > 0 && plan.stroke_i < plan.strokes.len() {
                         let stroke = &plan.strokes[plan.stroke_i];
                         if plan.point_i >= stroke.len() {
+                            if let Some(ref p) = reply_pen { let _ = p.up(); }
                             plan.stroke_i += 1;
                             plan.point_i = 0;
                             continue;
@@ -600,8 +676,15 @@ fn run() -> std::io::Result<()> {
                         if plan.point_i > 0 {
                             let (px, py) = stroke[plan.point_i - 1];
                             surf.brush_line(px, py, x, y, 2, BLACK);
+                            if let Some(ref p) = reply_pen {
+                                // Resuming after a real-pen pause: touch down
+                                // again where the stroke left off.
+                                if pen_lifted { let _ = p.down_at(px, py); pen_lifted = false; }
+                                let _ = p.goto(x, y);
+                            }
                         } else {
                             surf.stamp(x, y, 2, BLACK);
+                            if let Some(ref p) = reply_pen { let _ = p.down_at(x, y); pen_lifted = false; }
                         }
                         dirty.add(x, y, 4);
                         plan.point_i += 1;
@@ -612,6 +695,7 @@ fn run() -> std::io::Result<()> {
                         disp.update(x, y, w, h, true);
                     }
                     if plan.stroke_i >= plan.strokes.len() && rx.is_none() {
+                        if let Some(ref p) = reply_pen { let _ = p.up(); }
                         // The turn is complete: the diary remembers it.
                         if !turn_failed && !turn_reply.is_empty() {
                             if let Some(ref mut s) = store {
@@ -627,6 +711,9 @@ fn run() -> std::io::Result<()> {
                         let chars: usize = plan.strokes.iter().map(|s| s.len()).sum();
                         let linger = Duration::from_millis(4000 + (chars as u64) * 2);
                         let region = plan.region;
+                        if !takeover && !xochitl && !region.is_empty() {
+                            reink = Some((region, Instant::now() + Duration::from_millis(250), 2));
+                        }
                         State::Lingering { until: Instant::now() + linger.min(Duration::from_secs(20)), region }
                     } else {
                         State::Replying { plan, next: Instant::now() + Duration::from_millis(14), rx }
@@ -744,8 +831,20 @@ fn run() -> std::io::Result<()> {
             }
         };
 
+        // Cumulative re-drive of the finished reply: only while it lingers
+        // untouched — a fade in progress must not be re-inked over.
+        if let Some((region, at, left)) = reink {
+            if !matches!(state, State::Lingering { .. }) {
+                reink = None;
+            } else if Instant::now() >= at {
+                let (x, y, w, h) = region.rect();
+                disp.update(x, y, w, h, false);
+                reink = (left > 1).then(|| (region, at + Duration::from_millis(400), left - 1));
+            }
+        }
+
         stylus_tapped = false;
-        std::thread::sleep(Duration::from_millis(2));
+        std::thread::sleep(Duration::from_millis(1));
     }
 
     eprintln!("riddle: the diary closes");
@@ -873,10 +972,32 @@ fn plan_reply(font: &FontRef, text: &str, y_start: Option<i32>) -> WritePlan {
     };
 
     for line_text in &lines {
-        let mut raster = script::rasterize_line(font, line_text, REPLY_PX);
-        script::thin(&mut raster);
-        let line_strokes = script::trace(&raster);
-        let x0 = (SCREEN_W as i32 - raster.width as i32) / 2;
+        // Zhang-Suen thinning destroys complex CJK crossing strokes (缺筆畫).
+        // For CJK lines: skip thin() and use scan_rows (row-by-row pixel runs)
+        // instead of trace() (skeleton walk), which loses strokes on fat blobs.
+        // Rasterize CJK character by character so the animation writes one
+        // glyph at a time like a hand, not whole-line scanlines like a fax.
+        let (line_strokes, line_width) = if script::has_cjk(line_text) {
+            let mut all: Vec<Vec<(i32, i32)>> = Vec::new();
+            let mut caret = 0f32;
+            for c in line_text.chars() {
+                let s = c.to_string();
+                let raster = script::rasterize_line(font, &s, REPLY_PX);
+                let dx = caret.round() as i32;
+                for st in script::scan_rows(&raster) {
+                    all.push(st.into_iter().map(|(x, y)| (x + dx, y)).collect());
+                }
+                caret += script::measure(font, &s, REPLY_PX);
+            }
+            (all, caret.ceil() as i32 + 4)
+        } else {
+            let mut raster = script::rasterize_line(font, line_text, REPLY_PX);
+            script::thin(&mut raster);
+            let strokes = script::trace(&raster);
+            let w = raster.width as i32;
+            (strokes, w)
+        };
+        let x0 = (SCREEN_W as i32 - line_width) / 2;
         let wobble = jitter();
         for s in line_strokes {
             let mapped: Vec<(i32, i32)> = s.iter().map(|&(sx, sy)| (x0 + sx, y + sy + wobble)).collect();

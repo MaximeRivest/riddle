@@ -9,3 +9,5 @@ oracle.env
 riddle/dist/
 drawlab/dist/
 home/dist/
+riddle/riddle-rm2
+.DS_Store

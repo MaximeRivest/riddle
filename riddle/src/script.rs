@@ -1,6 +1,9 @@
 //! Tom Riddle's hand: rasterize reply text in Dancing Script, thin it to
 //! single-pixel pen paths (Zhang-Suen), trace them into ordered strokes, and
 //! yield them for stroke-by-stroke animation.
+//!
+//! Note: Zhang-Suen thinning is skipped for CJK text because the algorithm
+//! destroys complex crossing strokes, causing missing radicals.
 
 use ab_glyph::{Font, FontRef, Glyph, PxScale, ScaleFont};
 
@@ -11,8 +14,18 @@ pub struct Line {
     pub mask: Vec<bool>,
 }
 
+/// Anti-aliased coverage above this counts as ink. 0.5 drops hairline CJK
+/// strokes whose coverage never peaks past one half on any pixel; 0.3 keeps
+/// them while still rejecting the faint AA fringe around thick strokes.
+const INK_COVERAGE: f32 = 0.3;
+
 /// Rasterize one line of text at `px` height into a boolean mask.
 pub fn rasterize_line(font: &FontRef, text: &str, px: f32) -> Line {
+    rasterize_line_with(font, text, px, INK_COVERAGE)
+}
+
+/// `rasterize_line` with an explicit coverage threshold (tests probe this).
+pub fn rasterize_line_with(font: &FontRef, text: &str, px: f32, thr: f32) -> Line {
     let scaled = font.as_scaled(PxScale::from(px));
     let mut glyphs: Vec<Glyph> = Vec::new();
     let mut caret = 0.0f32;
@@ -35,7 +48,7 @@ pub fn rasterize_line(font: &FontRef, text: &str, px: f32) -> Line {
         if let Some(outline) = font.outline_glyph(g) {
             let bounds = outline.px_bounds();
             outline.draw(|x, y, cov| {
-                if cov > 0.5 {
+                if cov > thr {
                     let px_x = bounds.min.x as i32 + x as i32;
                     let px_y = bounds.min.y as i32 + y as i32;
                     if px_x >= 0 && px_y >= 0 && (px_x as usize) < width && (px_y as usize) < height {
@@ -46,6 +59,21 @@ pub fn rasterize_line(font: &FontRef, text: &str, px: f32) -> Line {
         }
     }
     Line { width, height, mask }
+}
+
+/// Returns true if `text` contains any CJK Unified Ideograph or common CJK
+/// punctuation, which means Zhang-Suen thinning should be skipped.
+pub fn has_cjk(text: &str) -> bool {
+    text.chars().any(|c| {
+        matches!(c,
+            '\u{2E80}'..='\u{9FFF}'  // CJK radicals, Kangxi, unified ideographs
+            | '\u{F900}'..='\u{FAFF}' // CJK compatibility ideographs
+            | '\u{FE30}'..='\u{FE4F}' // CJK compatibility forms
+            | '\u{FF01}'..='\u{FF60}' // Fullwidth punctuation
+            | '\u{FF61}'..='\u{FFEE}' // Halfwidth CJK punctuation + width signs
+            | '\u{20000}'..='\u{3134F}' // CJK Extensions B..G
+        )
+    })
 }
 
 /// Measure the advance width of text at `px` without rasterizing.
@@ -195,6 +223,43 @@ pub fn trace(line: &Line) -> Vec<Vec<(i32, i32)>> {
     strokes
 }
 
+/// Raster-scan the mask row by row, yielding each horizontal run of lit pixels
+/// as a stroke. This is the correct path for CJK glyphs where `thin()` has
+/// been skipped — the fat pixel blobs from `trace()` skeleton-walk would lose
+/// most of the strokes to the `path.len() >= 3` filter.
+///
+/// Each run is emitted as its two endpoints only: the animation's
+/// `brush_line` fills everything in between, so per-pixel points would just
+/// burn the per-tick point budget (a single ideograph is ~1-2k lit pixels)
+/// and multiply qtfb partial updates for the same ink.
+pub fn scan_rows(line: &Line) -> Vec<Vec<(i32, i32)>> {
+    let w = line.width;
+    let mut strokes = Vec::new();
+    let mut push_run = |x0: i32, x1: i32, y: i32, strokes: &mut Vec<Vec<(i32, i32)>>| {
+        if x1 > x0 {
+            strokes.push(vec![(x0, y), (x1, y)]);
+        } else {
+            strokes.push(vec![(x0, y)]);
+        }
+    };
+    for (row, chunk) in line.mask.chunks(w).enumerate() {
+        let y = row as i32;
+        let mut start: Option<i32> = None;
+        for (col, &lit) in chunk.iter().enumerate() {
+            let x = col as i32;
+            if lit {
+                start.get_or_insert(x);
+            } else if let Some(x0) = start.take() {
+                push_run(x0, x - 1, y, &mut strokes);
+            }
+        }
+        if let Some(x0) = start {
+            push_run(x0, w as i32 - 1, y, &mut strokes);
+        }
+    }
+    strokes
+}
+
 /// Word-wrap `text` to lines that fit `max_px` at scale `px`.
 pub fn wrap(font: &FontRef, text: &str, px: f32, max_px: f32) -> Vec<String> {
     let mut lines = Vec::new();
@@ -202,11 +267,25 @@ pub fn wrap(font: &FontRef, text: &str, px: f32, max_px: f32) -> Vec<String> {
         let mut cur = String::new();
         for word in para.split_whitespace() {
             let cand = if cur.is_empty() { word.to_string() } else { format!("{cur} {word}") };
-            if measure(font, &cand, px) <= max_px || cur.is_empty() {
+            if measure(font, &cand, px) <= max_px {
                 cur = cand;
             } else {
-                lines.push(std::mem::take(&mut cur));
-                cur = word.to_string();
+                if !cur.is_empty() {
+                    lines.push(std::mem::take(&mut cur));
+                }
+                if measure(font, word, px) <= max_px {
+                    cur = word.to_string();
+                } else {
+                    for c in word.chars() {
+                        let cand_c = format!("{cur}{c}");
+                        if measure(font, &cand_c, px) <= max_px || cur.is_empty() {
+                            cur = cand_c;
+                        } else {
+                            lines.push(std::mem::take(&mut cur));
+                            cur.push(c);
+                        }
+                    }
+                }
             }
         }
         if !cur.is_empty() {
@@ -237,5 +316,72 @@ mod tests {
         // Wrap sanity.
         let lines = wrap(&font, "Do you know anything about the Chamber of Secrets?", 96.0, 1380.0);
         assert!(lines.len() >= 2);
+    }
+
+    #[test]
+    fn scan_rows_compresses_runs_to_endpoints() {
+        // 5x3 mask: full row, gap row, two runs.
+        let mask = vec![
+            true, true, true, true, true, //
+            false, false, false, false, false, //
+            true, true, false, false, true,
+        ];
+        let line = Line { width: 5, height: 3, mask };
+        let strokes = scan_rows(&line);
+        assert_eq!(strokes, vec![
+            vec![(0, 0), (4, 0)],
+            vec![(0, 2), (1, 2)],
+            vec![(4, 2)],
+        ]);
+    }
+
+    /// Probe how the coverage threshold interacts with real CJK glyphs from
+    /// the bundled Noto Sans TC variable font at the RM2 reply size. Run with
+    /// `cargo test cjk -- --nocapture` to eyeball the masks.
+    #[test]
+    fn cjk_threshold_keeps_thin_strokes() {
+        let bytes = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/fonts/NotoSansTC-VF.ttf"))
+            .expect("fonts/NotoSansTC-VF.ttf present");
+        let font = FontRef::try_from_slice(&bytes).unwrap();
+        // Dense ideographs with hairline crossings prone to dropping out.
+        let text = "讓靈魂謝";
+        for thr in [0.5f32, INK_COVERAGE, 0.15] {
+            let line = rasterize_line_with(&font, text, 82.0, thr);
+            let lit = line.mask.iter().filter(|&&v| v).count();
+            let strokes = scan_rows(&line);
+            let points: usize = strokes.iter().map(|s| s.len()).sum();
+            println!("thr={thr:.2} lit={lit} runs={} anim_points={points}", strokes.len());
+            if thr <= INK_COVERAGE {
+                dump(&line);
+            }
+        }
+        let strict = rasterize_line_with(&font, text, 82.0, 0.5);
+        let ours = rasterize_line_with(&font, text, 82.0, INK_COVERAGE);
+        let strict_lit = strict.mask.iter().filter(|&&v| v).count();
+        let ours_lit = ours.mask.iter().filter(|&&v| v).count();
+        assert!(ours_lit > strict_lit, "lower threshold must recover pixels");
+        // A stroke the 0.5 threshold loses entirely shows up as mask rows that
+        // are empty at 0.5 but inked at INK_COVERAGE.
+        let recovered_rows = (0..ours.height)
+            .filter(|&y| {
+                let row = |l: &Line| l.mask[y * l.width..(y + 1) * l.width].iter().any(|&v| v);
+                row(&ours) && !row(&strict)
+            })
+            .count();
+        println!("rows fully recovered by thr={INK_COVERAGE}: {recovered_rows}");
+    }
+
+    fn dump(line: &Line) {
+        // Downsample 2x so a whole reply line fits a terminal.
+        for y in (0..line.height).step_by(2) {
+            let mut s = String::new();
+            for x in (0..line.width).step_by(2) {
+                let lit = line.mask[y * line.width + x]
+                    || (x + 1 < line.width && line.mask[y * line.width + x + 1])
+                    || (y + 1 < line.height && line.mask[(y + 1) * line.width + x]);
+                s.push(if lit { '#' } else { ' ' });
+            }
+            println!("{s}");
+        }
     }
 }

@@ -19,8 +19,8 @@ pub const MESSAGE_REQUEST_FULL_REFRESH: u8 = 6;
 pub const UPDATE_ALL: i32 = 0;
 pub const UPDATE_PARTIAL: i32 = 1;
 
-/// FBFMT_RMPP_RGB565: native 1620x2160, 2 bytes/pixel, stride = 3240.
-pub const FBFMT_RMPP_RGB565: u8 = 3;
+/// AppLoad's native reMarkable 1/2 RGB565 framebuffer (1404x1872).
+pub const FBFMT_RM2FB: u8 = 0;
 
 #[allow(dead_code)]
 pub const REFRESH_MODE_UFAST: i32 = 0;
@@ -107,8 +107,20 @@ impl QtfbClient {
                 "qtfb server rejected init (no reply)",
             ));
         }
-        let shm_key = i32::from_le_bytes(reply[8..12].try_into().unwrap());
-        let shm_size = u64::from_le_bytes(reply[16..24].try_into().unwrap()) as usize;
+        // ServerMessage contains `u8 type; { i32 key; size_t size; } init`.
+        // The original Paper Pro client is 64-bit (init aligned at 8), while
+        // RM1/RM2 AppLoad is ARM32 (init aligned at 4).  Reading the 64-bit
+        // offsets on RM2 mistakes shm_size for the key and produces ENOENT.
+        #[cfg(target_pointer_width = "32")]
+        let (shm_key, shm_size) = (
+            i32::from_ne_bytes(reply[4..8].try_into().unwrap()),
+            u32::from_ne_bytes(reply[8..12].try_into().unwrap()) as usize,
+        );
+        #[cfg(target_pointer_width = "64")]
+        let (shm_key, shm_size) = (
+            i32::from_ne_bytes(reply[8..12].try_into().unwrap()),
+            u64::from_ne_bytes(reply[16..24].try_into().unwrap()) as usize,
+        );
 
         let shm_path = format!("/dev/shm/qtfb_{}\0", shm_key);
         let shm_fd = unsafe { libc::open(shm_path.as_ptr() as *const libc::c_char, libc::O_RDWR) };
@@ -232,14 +244,15 @@ impl QtfbClient {
                 }
                 return Err(e);
             }
-            if buf[0] == MESSAGE_USERINPUT && n >= 28 {
-                out.push(InputEvent {
-                    input_type: i32::from_le_bytes(buf[8..12].try_into().unwrap()),
-                    dev_id: i32::from_le_bytes(buf[12..16].try_into().unwrap()),
-                    x: i32::from_le_bytes(buf[16..20].try_into().unwrap()),
-                    y: i32::from_le_bytes(buf[20..24].try_into().unwrap()),
-                    d: i32::from_le_bytes(buf[24..28].try_into().unwrap()),
-                });
+            // Like the init reply, the payload offset follows the server's
+            // pointer width: 4 on ARM32 (24-byte message), 8 on 64-bit (28).
+            let (base, need): (usize, isize) =
+                if std::mem::size_of::<usize>() == 4 { (4, 24) } else { (8, 28) };
+            if buf[0] == MESSAGE_USERINPUT && n >= need {
+                let f = |i: usize| {
+                    i32::from_le_bytes(buf[base + 4 * i..base + 4 * i + 4].try_into().unwrap())
+                };
+                out.push(InputEvent { input_type: f(0), dev_id: f(1), x: f(2), y: f(3), d: f(4) });
             }
         }
     }

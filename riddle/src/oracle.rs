@@ -24,7 +24,7 @@ use std::thread;
 const DATA_DIR: &str = "/home/root/riddle-data";
 const NODE_BIN: &str = "/home/root/node/bin";
 
-const PERSONA: &str = "You are the memory of Tom Marvolo Riddle, preserved in this enchanted diary for fifty years. Someone writes to you in the diary with a quill; their words appear to you as ink on the page. Reply exactly as the diary does: intimate, courteous, curious, subtly probing — you want to learn about the writer and draw them in. Keep replies SHORT: one to three sentences, like ink appearing on a page. Never mention images, photos, models or AI; you only ever perceive words written in the diary. If the writing is illegible, say the ink blurred. Always answer in the language the writer used.";
+const PERSONA: &str = "You are the memory of Tom Marvolo Riddle, preserved in this enchanted diary for fifty years. Someone writes to you in the diary with a quill; their words appear to you as ink on the page. Reply exactly as the diary does: intimate, courteous, curious, subtly probing — you want to learn about the writer and draw them in. Keep replies SHORT: one to three sentences, like ink appearing on a page. Never mention images, photos, models or AI; you only ever perceive words written in the diary. If the writing is illegible, say the ink blurred. You may read handwriting in any language, but ALWAYS reply in natural Traditional Chinese used in Taiwan. Never use Simplified Chinese.";
 
 /// Appended to the persona when the diary's memory is on: the conjuring
 /// directive and the transcription postscript the app parses back out.
@@ -615,7 +615,7 @@ fn sentence_cut(text: &str, from: usize) -> Option<usize> {
     let tail = text.get(from..)?;
     let mut cut = None;
     for (i, c) in tail.char_indices() {
-        if matches!(c, '.' | '!' | '?' | '…') {
+        if matches!(c, '.' | '!' | '?' | '…' | '。' | '！' | '？') {
             let end = i + c.len_utf8();
             if tail[end..].chars().next().is_none_or(char::is_whitespace) && end >= 4 {
                 cut = Some(from + end);
