@@ -2,7 +2,7 @@
 //! the diary's gestures; touching the pen to the page dismisses it. Detection
 //! is local geometry — no oracle — so the guide works even with no network.
 
-use crate::fb::{BBox, SCREEN_H, SCREEN_W};
+use crate::fb::BBox;
 use crate::script;
 use crate::surface::{Surface, BLACK, WHITE};
 use ab_glyph::FontRef;
@@ -144,7 +144,7 @@ pub struct Help {
 /// Draw the guide panel centered on the page; returns it for later dismissal.
 /// The gesture list depends on the display mode: only takeover owns the
 /// touchscreen (5-finger exit) and the power button.
-pub fn show(surf: &mut Surface, font: &FontRef, takeover: bool) -> Help {
+pub fn show(surf: &mut Surface, font: &FontRef, takeover: bool, sw: usize, sh: usize) -> Help {
     let body = if takeover { BODY_TAKEOVER } else { BODY_WINDOWED };
     let title_h = (TITLE_PX * 1.4) as usize;
     let line_h = (BODY_PX * 1.3) as usize;
@@ -154,10 +154,10 @@ pub fn show(surf: &mut Surface, font: &FontRef, takeover: bool) -> Help {
     for l in body {
         wmax = wmax.max(script::measure(font, l, BODY_PX));
     }
-    let pw = (wmax as usize + 2 * PAD).min(SCREEN_W - 40);
+    let pw = (wmax as usize + 2 * PAD).min(sw - 40);
     let ph = PAD + title_h + line_h / 2 + body.len() * line_h + footer_h + PAD;
-    let px = (SCREEN_W - pw) / 2;
-    let py = (SCREEN_H.saturating_sub(ph)) / 2;
+    let px = (sw - pw) / 2;
+    let py = (sh.saturating_sub(ph)) / 2;
 
     let saved = surf.copy_rect(px, py, pw, ph);
     surf.fill_rect(px, py, pw, ph, WHITE);
@@ -191,19 +191,19 @@ impl Help {
 
 /// Replace the page with the full-screen sleep card; returns the saved page
 /// pixels so waking can restore them exactly.
-pub fn show_sleep(surf: &mut Surface, font: &FontRef) -> Vec<u8> {
-    let saved = surf.copy_rect(0, 0, SCREEN_W, SCREEN_H);
-    surf.fill_rect(0, 0, SCREEN_W, SCREEN_H, WHITE);
-    frame(surf, 48, 48, SCREEN_W - 96, SCREEN_H - 96, 4);
-    frame(surf, 66, 66, SCREEN_W - 132, SCREEN_H - 132, 1);
-    let y = SCREEN_H * 38 / 100;
-    blit_centered(surf, font, "The diary sleeps.", 116.0, 0, SCREEN_W, y);
-    blit_centered(surf, font, "Press the button to wake it.", 56.0, 0, SCREEN_W, y + 230);
+pub fn show_sleep(surf: &mut Surface, font: &FontRef, sw: usize, sh: usize) -> Vec<u8> {
+    let saved = surf.copy_rect(0, 0, sw, sh);
+    surf.fill_rect(0, 0, sw, sh, WHITE);
+    frame(surf, 48, 48, sw - 96, sh - 96, 4);
+    frame(surf, 66, 66, sw - 132, sh - 132, 1);
+    let y = sh * 38 / 100;
+    blit_centered(surf, font, "The diary sleeps.", 116.0, 0, sw, y);
+    blit_centered(surf, font, "Press the button to wake it.", 56.0, 0, sw, y + 230);
     saved
 }
 
-pub fn restore_sleep(surf: &mut Surface, saved: &[u8]) {
-    surf.paste_rect(0, 0, SCREEN_W, SCREEN_H, saved);
+pub fn restore_sleep(surf: &mut Surface, saved: &[u8], sw: usize, sh: usize) {
+    surf.paste_rect(0, 0, sw, sh, saved);
 }
 
 fn frame(surf: &mut Surface, x: usize, y: usize, w: usize, h: usize, t: usize) {
@@ -290,7 +290,7 @@ mod tests {
 
     #[test]
     fn modal_renders_and_restores() {
-        let (w, h) = (SCREEN_W, SCREEN_H);
+        let (w, h) = (1620usize, 2160usize);
         let mut buf = vec![0xFFu8; w * h * 4];
         let ptr = buf.as_mut_ptr();
         let mut surf = Surface::new(ptr, buf.len(), w, h, w * 4, crate::surface::PixFmt::Rgb32);
@@ -300,7 +300,7 @@ mod tests {
         surf.fill_rect(700, 1000, 200, 200, BLACK);
         let before = surf.copy_rect(0, 0, w, h);
 
-        let panel = show(&mut surf, &font, true);
+        let panel = show(&mut surf, &font, true, w, h);
         let (px, py, pw, ph) = panel.region.rect();
         assert!(pw > 400 && ph > 400, "panel too small: {pw}x{ph}");
         // Panel must contain ink (text + frame).
@@ -336,7 +336,7 @@ mod tests {
 
     #[test]
     fn sleep_page_renders_and_restores() {
-        let (w, h) = (SCREEN_W, SCREEN_H);
+        let (w, h) = (1620usize, 2160usize);
         let mut buf = vec![0xFFu8; w * h * 4];
         let ptr = buf.as_mut_ptr();
         let mut surf = Surface::new(ptr, buf.len(), w, h, w * 4, crate::surface::PixFmt::Rgb32);
@@ -345,7 +345,7 @@ mod tests {
         surf.fill_rect(300, 300, 400, 400, BLACK);
         let before = surf.copy_rect(0, 0, w, h);
 
-        let saved = show_sleep(&mut surf, &font);
+        let saved = show_sleep(&mut surf, &font, w, h);
         let mut black = 0usize;
         for y in 0..h {
             for x in 0..w {
@@ -370,7 +370,7 @@ mod tests {
         enc.write_header().unwrap().write_image_data(&gray).unwrap();
         eprintln!("sleep snapshot: {}", out.display());
 
-        restore_sleep(&mut surf, &saved);
+        restore_sleep(&mut surf, &saved, w, h);
         assert_eq!(before, surf.copy_rect(0, 0, w, h), "sleep restore is not exact");
     }
 }
