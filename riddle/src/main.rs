@@ -40,6 +40,8 @@ const IDLE_COMMIT: Duration = Duration::from_millis(2800);
 const ORACLE_PATIENCE: Duration = Duration::from_secs(120);
 const REPLY_PX: f32 = 96.0;
 const MARGIN_X: i32 = 120;
+/// Where a fresh reply starts writing from the top of the (now blank) page.
+const REPLY_TOP_MARGIN: i32 = 90;
 
 const USAGE: &str = "\
 riddle — the diary of Tom Riddle
@@ -62,7 +64,16 @@ enum State {
     Listening { last_pen: Option<Instant> },
     Drinking { stage: u32, next: Instant, region: BBox, rx: OracleRx },
     Thinking { rx: OracleRx, pulse: Instant, blot_on: bool, since: Instant },
-    Replying { plan: WritePlan, next: Instant, rx: Option<OracleRx> },
+    /// `pending` holds streamed text that arrived after this page filled up;
+    /// once the current page finishes inking, it parks in `PageFull`.
+    Replying { plan: WritePlan, next: Instant, rx: Option<OracleRx>, pending: String },
+    /// A full page, done inking, with more reply text waiting off-page. Sits
+    /// until the pen touches the page — turning it before it's been read
+    /// would be pointless — while still absorbing any further streamed text.
+    PageFull { region: BBox, pending: String, rx: Option<OracleRx> },
+    /// The page turn itself: dissolve the full page like `Drinking`, then
+    /// resume `Replying` with `pending` written fresh from the top.
+    TurningPage { stage: u32, next: Instant, region: BBox, pending: String, rx: Option<OracleRx> },
     Lingering { until: Instant, region: BBox },
     FadingReply { stage: u32, next: Instant, region: BBox },
     /// The guide panel. `panel: None` = dismissed, waiting for pen-up so the
@@ -357,6 +368,9 @@ fn run() -> std::io::Result<()> {
                     State::Lingering { region, .. } => {
                         state = State::FadingReply { stage: 0, next: Instant::now(), region };
                     }
+                    State::PageFull { region, pending, rx } => {
+                        state = State::TurningPage { stage: 0, next: Instant::now(), region, pending, rx };
+                    }
                     _ => {}
                 }
             }
@@ -386,6 +400,8 @@ fn run() -> std::io::Result<()> {
                         *last_pen = Some(Instant::now());
                     } else if let State::Lingering { region, .. } = state {
                         state = State::FadingReply { stage: 0, next: Instant::now(), region };
+                    } else if let State::PageFull { region, pending, rx } = state {
+                        state = State::TurningPage { stage: 0, next: Instant::now(), region, pending, rx };
                     }
                 }
                 qtfb::INPUT_PEN_RELEASE => {
@@ -434,8 +450,8 @@ fn run() -> std::io::Result<()> {
                         // No spirit at all: don't eat ink that nothing will
                         // answer — leave the writing and put the reason below.
                         let y = (user_ink.bbox.y1 + 90).min(screen_h() as i32 - 400);
-                        let plan = plan_reply(&font, &oracle_excuse("no oracle"), Some(y));
-                        State::Replying { plan, next: Instant::now(), rx: None }
+                        let (plan, pending) = plan_reply(&font, &oracle_excuse("no oracle"), Some(y));
+                        State::Replying { plan, next: Instant::now(), rx: None, pending }
                     } else {
                         if let Err(e) = user_ink.to_png(&surf, PNG_PATH) {
                             eprintln!("riddle: rasterize failed: {e}");
@@ -499,16 +515,16 @@ fn run() -> std::io::Result<()> {
                                 Some(st) => st,
                                 None => {
                                     eprintln!("riddle: memory {id} is missing");
-                                    let plan = plan_reply(&font, &oracle_excuse("lost page"), None);
+                                    let (plan, pending) = plan_reply(&font, &oracle_excuse("lost page"), None);
                                     turn_failed = true;
-                                    State::Replying { plan, next: Instant::now(), rx: None }
+                                    State::Replying { plan, next: Instant::now(), rx: None, pending }
                                 }
                             }
                         }
                         Ok(Event::Ink(text)) => {
                             turn_reply.push_str(&text);
-                            let plan = plan_reply(&font, &text, None);
-                            State::Replying { plan, next: Instant::now(), rx: Some(rx) }
+                            let (plan, pending) = plan_reply(&font, &text, None);
+                            State::Replying { plan, next: Instant::now(), rx: Some(rx), pending }
                         }
                         Ok(Event::Transcript(t)) => {
                             // Transcript with no prose (model skipped the
@@ -519,8 +535,8 @@ fn run() -> std::io::Result<()> {
                         Err(e) => {
                             eprintln!("riddle: oracle failed: {e}");
                             turn_failed = true;
-                            let plan = plan_reply(&font, &oracle_excuse(&e), None);
-                            State::Replying { plan, next: Instant::now(), rx: None }
+                            let (plan, pending) = plan_reply(&font, &oracle_excuse(&e), None);
+                            State::Replying { plan, next: Instant::now(), rx: None, pending }
                         }
                     }
                 }
@@ -531,8 +547,8 @@ fn run() -> std::io::Result<()> {
                         eprintln!("riddle: oracle timed out after {}s", ORACLE_PATIENCE.as_secs());
                         surf.fill_rect(screen_w() / 2 - 14, screen_h() / 2 - 14, 28, 28, WHITE);
                         disp.update(screen_w() as i32 / 2 - 14, screen_h() as i32 / 2 - 14, 28, 28, true);
-                        let plan = plan_reply(&font, &oracle_excuse("timed out"), None);
-                        State::Replying { plan, next: Instant::now(), rx: None }
+                        let (plan, pending) = plan_reply(&font, &oracle_excuse("timed out"), None);
+                        State::Replying { plan, next: Instant::now(), rx: None, pending }
                     } else if pulse.elapsed() >= Duration::from_millis(600) {
                         let (cx, cy) = (screen_w() as i32 / 2, screen_h() as i32 / 2);
                         if blot_on {
@@ -549,23 +565,27 @@ fn run() -> std::io::Result<()> {
                 Err(mpsc::TryRecvError::Disconnected) => State::Listening { last_pen: None },
             },
 
-            State::Replying { mut plan, next, mut rx } => {
+            State::Replying { mut plan, next, mut rx, mut pending } => {
                 // More of the reply may still be streaming in: append each
                 // new chunk below what is already planned, mid-animation.
+                // Once this page is full, further chunks queue in `pending`
+                // for the next page instead of writing off the bottom.
                 if let Some(ref r) = rx {
                     let drop_rx = match r.try_recv() {
                         Ok(Ok(Event::Ink(more))) => {
-                            if plan.next_y > screen_h() as i32 - 200 {
-                                // The page is full: let the rest go unwritten
-                                // rather than inking below the visible page.
-                                eprintln!("riddle: reply reached the page bottom; trailing text dropped");
-                                true
+                            turn_reply.push_str(" ");
+                            turn_reply.push_str(&more);
+                            if pending.is_empty() {
+                                let leftover = append_reply(&font, &mut plan, &more);
+                                if !leftover.is_empty() {
+                                    eprintln!("riddle: page full — buffering rest for a new page");
+                                    pending = leftover;
+                                }
                             } else {
-                                turn_reply.push_str(" ");
-                                turn_reply.push_str(&more);
-                                append_reply(&font, &mut plan, &more);
-                                false
+                                pending.push(' ');
+                                pending.push_str(&more);
                             }
+                            false
                         }
                         Ok(Ok(Event::Transcript(t))) => {
                             turn_transcript = Some(t);
@@ -612,7 +632,13 @@ fn run() -> std::io::Result<()> {
                         let (x, y, w, h) = dirty.rect();
                         disp.update(x, y, w, h, true);
                     }
-                    if plan.stroke_i >= plan.strokes.len() && rx.is_none() {
+                    if plan.stroke_i >= plan.strokes.len() && !pending.is_empty() {
+                        // This page is fully inked and there's more to show:
+                        // park until the pen confirms it's been read, rather
+                        // than dissolving and moving on unread.
+                        let region = plan.region;
+                        State::PageFull { region, pending, rx }
+                    } else if plan.stroke_i >= plan.strokes.len() && rx.is_none() {
                         // The turn is complete: the diary remembers it.
                         if !turn_failed && !turn_reply.is_empty() {
                             if let Some(ref mut s) = store {
@@ -630,10 +656,60 @@ fn run() -> std::io::Result<()> {
                         let region = plan.region;
                         State::Lingering { until: Instant::now() + linger.min(Duration::from_secs(20)), region }
                     } else {
-                        State::Replying { plan, next: Instant::now() + Duration::from_millis(14), rx }
+                        State::Replying { plan, next: Instant::now() + Duration::from_millis(14), rx, pending }
                     }
                 } else {
-                    State::Replying { plan, next, rx }
+                    State::Replying { plan, next, rx, pending }
+                }
+            }
+
+            State::PageFull { region, mut pending, mut rx } => {
+                // Parked waiting for a touch (handled in the pen-event loop
+                // above); keep absorbing any further streamed text so it's
+                // ready to write as soon as the page turns.
+                if let Some(ref r) = rx {
+                    match r.try_recv() {
+                        Ok(Ok(Event::Ink(more))) => {
+                            turn_reply.push_str(" ");
+                            turn_reply.push_str(&more);
+                            pending.push(' ');
+                            pending.push_str(&more);
+                        }
+                        Ok(Ok(Event::Transcript(t))) => turn_transcript = Some(t),
+                        Ok(Ok(Event::Show(_))) => {
+                            eprintln!("riddle: conjuring directive mid-reply ignored");
+                        }
+                        Ok(Err(e)) => {
+                            eprintln!("riddle: oracle failed mid-reply: {e}");
+                            turn_failed = true;
+                            rx = None;
+                        }
+                        Err(mpsc::TryRecvError::Disconnected) => rx = None,
+                        Err(mpsc::TryRecvError::Empty) => {}
+                    }
+                }
+                State::PageFull { region, pending, rx }
+            }
+
+            State::TurningPage { stage, next, region, pending, rx } => {
+                const STAGES: u32 = 10;
+                if Instant::now() >= next {
+                    ink::dissolve_pass(&mut surf, region, stage, STAGES);
+                    let (x, y, w, h) = region.rect();
+                    disp.update(x, y, w, h, true);
+                    if stage + 1 >= STAGES {
+                        disp.full_refresh(surf.w, surf.h);
+                        // Whatever accumulated while parked might itself be
+                        // more than one page (e.g. the model kept streaming
+                        // while waiting for a touch); `still_pending` carries
+                        // any remainder into another page-full cycle.
+                        let (plan, still_pending) = plan_reply(&font, pending.trim(), None);
+                        State::Replying { plan, next: Instant::now(), rx, pending: still_pending }
+                    } else {
+                        State::TurningPage { stage: stage + 1, next: Instant::now() + Duration::from_millis(80), region, pending, rx }
+                    }
+                } else {
+                    State::TurningPage { stage, next, region, pending, rx }
                 }
             }
 
@@ -840,7 +916,10 @@ fn conjure(
     // Tom's old reply, below.
     if !entry.reply.is_empty() {
         let y = (ink_bottom + 130).min(screen_h() as i32 - 400);
-        let reply = plan_reply(font, &entry.reply, Some(y));
+        // Memory replay draws the whole remembered reply at once (it isn't
+        // streamed), so there's no `pending`/`rx` to hand overflow to;
+        // pagination for a long remembered reply is a separate improvement.
+        let (reply, _overflow) = plan_reply(font, &entry.reply, Some(y));
         for stroke in reply.strokes {
             let mapped: Vec<(i32, i32, i32)> = stroke.iter().map(|&(x, y)| (x, y, 2)).collect();
             for &(x, y, r) in &mapped {
@@ -857,14 +936,26 @@ fn conjure(
     })
 }
 
-/// Lay out reply text and produce screen-space strokes. `y_start` continues a
-/// streamed reply below its previous chunk; None places the first chunk.
-fn plan_reply(font: &FontRef, text: &str, y_start: Option<i32>) -> WritePlan {
+/// How far down the page a line may start and still count as "on the page".
+/// Below this, `plan_reply` stops and hands the rest back as leftover.
+const PAGE_BOTTOM: i32 = 200;
+
+/// Lay out reply text and produce screen-space strokes, stopping before the
+/// page bottom rather than writing off it. `y_start` continues a streamed
+/// reply below its previous chunk; None places the first chunk near the top.
+/// Returns the plan plus any text that didn't fit and must wait for a new
+/// page — empty when everything fit.
+fn plan_reply(font: &FontRef, text: &str, y_start: Option<i32>) -> (WritePlan, String) {
     let max_w = (screen_w() as i32 - 2 * MARGIN_X) as f32;
     let lines = script::wrap(font, text, REPLY_PX, max_w);
     let line_h = (REPLY_PX * 1.25) as i32;
-    let total_h = line_h * lines.len() as i32;
-    let mut y = y_start.unwrap_or(((screen_h() as i32 - total_h) / 3).max(60));
+    let mut y = y_start.unwrap_or(REPLY_TOP_MARGIN);
+
+    let limit = screen_h() as i32 - PAGE_BOTTOM;
+    let fit = if y > limit { 0 } else { ((limit - y) / line_h + 1).max(0) as usize };
+    let fit = fit.min(lines.len());
+    let leftover = lines[fit..].join(" ");
+
     let mut strokes = Vec::new();
     let mut region = BBox::empty();
     let mut seed = 0x1234u32;
@@ -873,7 +964,7 @@ fn plan_reply(font: &FontRef, text: &str, y_start: Option<i32>) -> WritePlan {
         ((seed >> 16) % 7) as i32 - 3
     };
 
-    for line_text in &lines {
+    for line_text in &lines[..fit] {
         let mut raster = script::rasterize_line(font, line_text, REPLY_PX);
         script::thin(&mut raster);
         let line_strokes = script::trace(&raster);
@@ -889,17 +980,19 @@ fn plan_reply(font: &FontRef, text: &str, y_start: Option<i32>) -> WritePlan {
         y += line_h;
     }
 
-    WritePlan { strokes, stroke_i: 0, point_i: 0, region, next_y: y }
+    (WritePlan { strokes, stroke_i: 0, point_i: 0, region, next_y: y }, leftover)
 }
 
 /// Splice a streamed continuation chunk into a running write animation.
-fn append_reply(font: &FontRef, plan: &mut WritePlan, more: &str) {
-    let cont = plan_reply(font, more, Some(plan.next_y));
+/// Returns any part of `more` that didn't fit on the current page.
+fn append_reply(font: &FontRef, plan: &mut WritePlan, more: &str) -> String {
+    let (cont, leftover) = plan_reply(font, more, Some(plan.next_y));
     if cont.strokes.is_empty() {
-        return;
+        return leftover;
     }
     plan.region.add(cont.region.x0, cont.region.y0, 0);
     plan.region.add(cont.region.x1, cont.region.y1, 0);
     plan.strokes.extend(cont.strokes);
     plan.next_y = cont.next_y;
+    leftover
 }
