@@ -23,6 +23,7 @@ public:
         NoRefresh = 0,
         CompleteRefresh = 1,
     };
+    // Signature varies by OS (3.28 dropped EPContentType). quill_c resolves via dlsym.
     unsigned long swapBuffers(QRect param_1, EPContentType epct, EPScreenMode type, QFlags<EPFramebuffer::UpdateFlag> flags);
     #ifdef EPFB_INTERNAL
     static EPFramebuffer *instance();

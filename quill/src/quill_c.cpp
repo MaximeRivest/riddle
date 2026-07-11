@@ -8,12 +8,34 @@
 #include "epframebuffer.h"
 #include <QCoreApplication>
 #include <QImage>
+#include <dlfcn.h>
 #include <cstring>
 #include <cstdio>
 
 static QCoreApplication *g_app = nullptr;
 static EPFramebuffer *g_fb = nullptr;
 static QImage *g_aux = nullptr;
+
+// OS 3.27 and earlier:
+//   swapBuffers(QRect, EPContentType, EPScreenMode, QFlags<UpdateFlag>)
+// OS 3.28+ dropped EPContentType from the QRect overload:
+//   swapBuffers(QRect, EPScreenMode, QFlags<UpdateFlag>)
+using SwapOldFn = unsigned long (*)(EPFramebuffer *, QRect, EPContentType,
+                                    EPScreenMode, EPFramebuffer::UpdateFlag);
+using SwapNewFn = unsigned long (*)(EPFramebuffer *, QRect, EPScreenMode,
+                                    EPFramebuffer::UpdateFlag);
+static SwapOldFn g_swap_old = nullptr;
+static SwapNewFn g_swap_new = nullptr;
+
+static void resolve_swap() {
+    if (g_swap_old || g_swap_new) return;
+    g_swap_new = reinterpret_cast<SwapNewFn>(dlsym(
+        RTLD_DEFAULT,
+        "_ZN13EPFramebuffer11swapBuffersE5QRect12EPScreenMode6QFlagsINS_10UpdateFlagEE"));
+    g_swap_old = reinterpret_cast<SwapOldFn>(dlsym(
+        RTLD_DEFAULT,
+        "_ZN13EPFramebuffer11swapBuffersE5QRect13EPContentType12EPScreenMode6QFlagsINS_10UpdateFlagEE"));
+}
 
 extern "C" {
 
@@ -49,11 +71,20 @@ unsigned char *quill_buffer() {
 // full_refresh != 0 forces a flashing clear of the region.
 unsigned long quill_swap(int x, int y, int w, int h, int mode, int full_refresh) {
     if (!g_fb) return 0;
-    QFlags<EPFramebuffer::UpdateFlag> flags = full_refresh
+    resolve_swap();
+    EPFramebuffer::UpdateFlag flag = full_refresh
         ? EPFramebuffer::UpdateFlag::CompleteRefresh
         : EPFramebuffer::UpdateFlag::NoRefresh;
-    return g_fb->swapBuffers(QRect(x, y, w, h), EPContentType::Mono,
-                             (EPScreenMode)mode, flags);
+    QRect rect(x, y, w, h);
+    EPScreenMode screen = static_cast<EPScreenMode>(mode);
+    if (g_swap_new) {
+        return g_swap_new(g_fb, rect, screen, flag);
+    }
+    if (g_swap_old) {
+        return g_swap_old(g_fb, rect, EPContentType::Mono, screen, flag);
+    }
+    fprintf(stderr, "quill: no EPFramebuffer::swapBuffers symbol found\n");
+    return 0;
 }
 
 void quill_process_events() {
