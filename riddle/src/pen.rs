@@ -8,11 +8,13 @@
 use std::io;
 use std::os::fd::RawFd;
 
-use crate::fb::{SCREEN_H, SCREEN_W};
+use crate::fb::{screen_h, screen_w};
 
-// Digitizer axis ranges on the Paper Pro ("Elan marker input").
-const DIGI_MAX_X: i32 = 11180;
-const DIGI_MAX_Y: i32 = 15340;
+// Digitizer axis ranges read from the device itself via EVIOCGABS (differs
+// by panel: Paper Pro is 11180x15340, Paper Pro Move is 6760x11960). These
+// are only a fallback for the rare case the ioctl fails.
+const FALLBACK_DIGI_MAX_X: i32 = 11180;
+const FALLBACK_DIGI_MAX_Y: i32 = 15340;
 pub const MAX_PRESSURE: i32 = 4096;
 
 const EV_SYN: u16 = 0;
@@ -27,6 +29,36 @@ const BTN_TOOL_RUBBER: u16 = 321;
 const BTN_TOUCH: u16 = 330;
 
 const EVIOCGRAB: libc::c_ulong = 0x40044590;
+// EVIOCGABS(ABS_X)/EVIOCGABS(ABS_Y): _IOR('E', 0x40 + abs, struct input_absinfo).
+const EVIOCGABS_X: libc::c_ulong = 0x80184540;
+const EVIOCGABS_Y: libc::c_ulong = 0x80184541;
+
+#[repr(C)]
+#[derive(Default)]
+struct InputAbsInfo {
+    value: i32,
+    minimum: i32,
+    maximum: i32,
+    fuzz: i32,
+    flat: i32,
+    resolution: i32,
+}
+
+/// Read the digitizer's real axis maximum via EVIOCGABS, falling back to
+/// the Paper Pro's known range if the ioctl fails for some reason.
+fn query_abs_max(fd: RawFd, code: libc::c_ulong, fallback: i32) -> i32 {
+    let mut info = InputAbsInfo::default();
+    let r = unsafe { libc::ioctl(fd, code, &mut info as *mut InputAbsInfo) };
+    if r != 0 || info.maximum <= 0 {
+        eprintln!(
+            "riddle: warning: EVIOCGABS failed ({}), assuming {}",
+            io::Error::last_os_error(),
+            fallback
+        );
+        return fallback;
+    }
+    info.maximum
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
@@ -47,6 +79,8 @@ pub struct PenSample {
 
 pub struct PenDevice {
     fd: RawFd,
+    digi_max_x: i32,
+    digi_max_y: i32,
     // Accumulated state between SYN_REPORTs.
     raw_x: i32,
     raw_y: i32,
@@ -70,8 +104,13 @@ impl PenDevice {
             eprintln!("riddle: warning: EVIOCGRAB failed ({}) — xochitl will also see the pen", io::Error::last_os_error());
         }
         eprintln!("riddle: pen device {path} opened (grabbed: {})", grab == 0);
+        let digi_max_x = query_abs_max(fd, EVIOCGABS_X, FALLBACK_DIGI_MAX_X);
+        let digi_max_y = query_abs_max(fd, EVIOCGABS_Y, FALLBACK_DIGI_MAX_Y);
+        eprintln!("riddle: pen digitizer range {digi_max_x}x{digi_max_y}");
         Ok(Self {
             fd,
+            digi_max_x,
+            digi_max_y,
             raw_x: 0,
             raw_y: 0,
             pressure: 0,
@@ -127,8 +166,8 @@ impl PenDevice {
                         if self.dirty {
                             self.dirty = false;
                             out.push(PenSample {
-                                x: self.raw_x * (SCREEN_W as i32 - 1) / DIGI_MAX_X,
-                                y: self.raw_y * (SCREEN_H as i32 - 1) / DIGI_MAX_Y,
+                                x: self.raw_x * (screen_w() as i32 - 1) / self.digi_max_x,
+                                y: self.raw_y * (screen_h() as i32 - 1) / self.digi_max_y,
                                 pressure: self.pressure,
                                 tool: self.tool,
                                 touching: self.touching,
