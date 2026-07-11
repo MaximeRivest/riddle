@@ -109,6 +109,23 @@ impl MemoryStore {
         self.prune();
     }
 
+    /// The basilisk fang lands: forget every remembered page, on disk too.
+    /// Every `*.strokes` file in the memory dir goes — including orphans not
+    /// in the loaded index (a lost/corrupt index.tsv, or an append that wrote
+    /// strokes and then failed) — because erase must mean erase.
+    pub fn forget_all(&mut self) {
+        if let Ok(dir) = std::fs::read_dir(&self.dir) {
+            for entry in dir.flatten() {
+                let p = entry.path();
+                if p.extension().is_some_and(|x| x == "strokes") {
+                    let _ = std::fs::remove_file(&p);
+                }
+            }
+        }
+        let _ = std::fs::remove_file(self.index_path());
+        self.entries.clear();
+    }
+
     /// Forget the oldest pages beyond MAX_MEMORIES.
     fn prune(&mut self) {
         if self.entries.len() <= MAX_MEMORIES {

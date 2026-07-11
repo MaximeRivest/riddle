@@ -254,6 +254,13 @@ fn run() -> std::io::Result<()> {
     let mut stylus_on = false;
     let mut stylus_tapped = false;
     let mut ink_dirty = BBox::empty();
+    // Basilisk-fang erase: hold the eraser still on one spot for 3s and the
+    // diary's memory dies. (origin x, origin y, press start), the nominal
+    // splat radius already inked, and the bbox of everything the splat drew.
+    let mut stab: Option<(i32, i32, Instant)> = None;
+    let mut bleed: Option<Bleed> = None;
+    // Latest eraser contact this loop; None once the pen lifts or flips.
+    let mut eraser_at: Option<(i32, i32)> = None;
     let mut last_flush = Instant::now();
     // Takeover swaps are cheap and synchronous; qtfb needs coalescing.
     let flush_every = if takeover { Duration::from_millis(8) } else { Duration::from_millis(35) };
@@ -331,6 +338,7 @@ fn run() -> std::io::Result<()> {
                     if pen_down {
                         pen_down = false;
                         user_ink.pen_up();
+                        eraser_at = None;
                         if let State::Listening { ref mut last_pen } = state {
                             *last_pen = Some(Instant::now());
                         }
@@ -342,10 +350,21 @@ fn run() -> std::io::Result<()> {
                         pen_down = true;
                         let d = match s.tool {
                             pen::Tool::Pen => {
+                                eraser_at = None;
                                 let r = 2 + s.pressure * 3 / pen::MAX_PRESSURE;
                                 user_ink.pen_point(&mut surf, s.x, s.y, r)
                             }
-                            pen::Tool::Eraser => user_ink.erase_point(&mut surf, s.x, s.y, 22),
+                            pen::Tool::Eraser => {
+                                eraser_at = Some((s.x, s.y));
+                                // While the stab's warning ink pools, the tip
+                                // is a fang, not an eraser: don't erase (and
+                                // don't drop stroke points under the splat).
+                                if bleed.is_some() {
+                                    BBox::empty()
+                                } else {
+                                    user_ink.erase_point(&mut surf, s.x, s.y, 22)
+                                }
+                            }
                         };
                         if !d.is_empty() {
                             ink_dirty.add(d.x0, d.y0, 0);
@@ -399,6 +418,101 @@ fn run() -> std::io::Result<()> {
                 }
                 _ => {}
             }
+        }
+
+        // ---- basilisk-fang stab (hold the eraser still on one spot) ----
+        // One continuous process from first pooling to page-drown: the bleed
+        // (a noise-displaced distance field anchored to the paper) creeps
+        // while the fang is held, and the SAME bleed accelerates into the
+        // death past 3s. Lift before then and the page reabsorbs it.
+        let stab_live = pen_down && matches!(state, State::Listening { .. });
+        match (stab, eraser_at, stab_live) {
+            (None, Some((x, y)), true) => stab = Some((x, y, Instant::now())),
+            (Some((sx, sy, t0)), Some((x, y)), true) => {
+                let (dx, dy) = (x - sx, y - sy);
+                if dx * dx + dy * dy > 20 * 20 {
+                    // Drifted: this is erasing, not stabbing.
+                    if let Some(bl) = bleed.take() {
+                        bleed_absorb(&mut surf, &disp, &bl);
+                    }
+                    stab = Some((x, y, Instant::now()));
+                } else {
+                    let held = t0.elapsed();
+                    if held >= Duration::from_secs(3) {
+                        // The fang stays in the wound: the diary bleeds out.
+                        // Same bleed, same field — R just stops being gentle.
+                        eprintln!("riddle: basilisk fang — the diary's memory is erased");
+                        let mut bl = bleed
+                            .take()
+                            .unwrap_or_else(|| bleed_new(&surf, sx, sy, splat_seed(sx, sy)));
+                        // No abort past this point — the undo log can go.
+                        bl.painted = Vec::new();
+                        let (w, h) = (surf.w as i32, surf.h as i32);
+                        let corners = [(0i32, 0i32), (w - 1, 0), (0, h - 1), (w - 1, h - 1)];
+                        // Ease into the rush: the creep leans forward over
+                        // the first second or so instead of snapping to full
+                        // speed, and the full speed itself stays unhurried —
+                        // a drowning, not an explosion.
+                        let mut frame = 0i32;
+                        loop {
+                            let mult = 1.0 + (0.025 * frame as f32).min(0.22);
+                            let add = (2 + frame).min(14) as f32;
+                            let nr = (bl.r * mult + add).min(6000.0);
+                            frame += 1;
+                            bleed_grow(&mut surf, &mut bl, nr, false);
+                            disp.update(0, 0, w, h, true);
+                            let drowned = corners.iter().all(|&(qx, qy)| {
+                                let (cdx, cdy) = ((qx - bl.ox) as i64, (qy - bl.oy) as i64);
+                                let d2 = (cdx * cdx + cdy * cdy) as u64;
+                                let g = bl.field
+                                    [((qy / BLEED_CELL) * bl.fw + qx / BLEED_CELL) as usize]
+                                    as u64;
+                                d2 * 4096 <= (bl.r * bl.r) as u64 * g * g
+                            });
+                            if drowned {
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(90));
+                        }
+                        surf.fill_rect(0, 0, surf.w, surf.h, BLACK);
+                        disp.update(0, 0, w, h, true);
+                        std::thread::sleep(Duration::from_millis(500));
+                        if let Some(ref mut s) = store {
+                            s.forget_all();
+                        }
+                        surf.fill_rect(0, 0, surf.w, surf.h, WHITE);
+                        disp.full_refresh(surf.w, surf.h);
+                        user_ink.clear();
+                        ink_dirty = BBox::empty();
+                        stab = None;
+                        eraser_at = None;
+                        state = State::Listening { last_pen: None };
+                    } else if held >= Duration::from_millis(800) {
+                        // The bleed pools under the held fang — the warning,
+                        // and the writer's window to abort by lifting.
+                        if bleed.is_none() {
+                            bleed = Some(bleed_new(&surf, sx, sy, splat_seed(sx, sy)));
+                        }
+                        let bl = bleed.as_mut().unwrap();
+                        let target = 8.0 + (held.as_millis() as f32 - 800.0) / 2200.0 * 110.0;
+                        if target >= bl.r + 2.0 {
+                            bleed_grow(&mut surf, bl, target, true);
+                            let (bx, by, bw, bh) = bl.bbox.rect();
+                            disp.update(bx, by, bw, bh, true);
+                        }
+                    }
+                }
+            }
+            (Some(_), _, _) => {
+                // Lifted (or the state moved on): the page reabsorbs the
+                // bleed. Anything under it goes too — an eraser was pressed
+                // there, after all.
+                if let Some(bl) = bleed.take() {
+                    bleed_absorb(&mut surf, &disp, &bl);
+                }
+                stab = None;
+            }
+            _ => {}
         }
 
         // ---- coalesced ink flush ----
@@ -770,6 +884,161 @@ fn region_all_white(surf: &Surface, region: BBox) -> bool {
 
 /// What Tom writes when the spirit cannot answer: short, in a diary's voice,
 /// but specific enough to act on. The raw error still goes to stderr.
+/// Deterministic per-stab randomness: the splat keeps its shape as it grows.
+fn splat_seed(x: i32, y: i32) -> u32 {
+    let mut h = (x as u32).wrapping_mul(0x9E37_79B1) ^ (y as u32).wrapping_mul(0x85EB_CA6B);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0xC2B2_AE35);
+    h ^ (h >> 16)
+}
+
+/// Per-droplet hash stream (stable across redraws).
+fn splat_hash(seed: u32, i: u32) -> u32 {
+    let mut h = seed.wrapping_add(i.wrapping_mul(0x9E37_79B1));
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x85EB_CA6B);
+    h ^ (h >> 13)
+}
+
+/// A single continuous ink bleed, from first pooling to page-drown: a pixel
+/// is inked once dist(px, tip) ≤ R · f(px), where f is a multi-octave value-
+/// noise field ANCHORED TO THE PAPER. One process, one look: as R grows the
+/// front keeps meeting new paper — fingers run where the page drinks fast,
+/// bays lag where it doesn't — so growth reads as spreading ink, never as a
+/// shape being resized (the field never moves with the stain).
+struct Bleed {
+    ox: i32,
+    oy: i32,
+    /// Paper absorbency ≈ f×64 (f ~ 0.55..1.55), sampled every 4px.
+    field: Vec<u8>,
+    fw: i32,
+    r: f32,
+    bbox: BBox,
+    seed: u32,
+    /// Pixels the bleed itself blackened (they were white before), pooling
+    /// only. An abort restores exactly these — handwriting beneath the pool
+    /// was already dark, never enters this list, and so survives untouched.
+    painted: Vec<(u16, u16)>,
+}
+
+const BLEED_CELL: i32 = 4;
+
+fn bleed_new(surf: &Surface, ox: i32, oy: i32, seed: u32) -> Bleed {
+    let fw = surf.w as i32 / BLEED_CELL + 2;
+    let fh = surf.h as i32 / BLEED_CELL + 2;
+    // Three octaves of bilinear value noise (~44/100/220px wavelengths):
+    // fine feathering on the small pool, long fibres for the page-scale run.
+    let mut field = vec![0u8; (fw * fh) as usize];
+    let octaves: [(i32, f32); 3] = [(11, 0.35), (25, 0.30), (55, 0.35)];
+    let lat = |s: u32, lx: i32, ly: i32| {
+        (splat_hash(seed ^ s, (ly * 977 + lx) as u32) % 1000) as f32 / 1000.0
+    };
+    for y in 0..fh {
+        for x in 0..fw {
+            let mut n = 0.0f32;
+            for (oi, &(wl, amp)) in octaves.iter().enumerate() {
+                let (fx, fy) = (x as f32 / wl as f32, y as f32 / wl as f32);
+                let (lx, ly) = (fx.floor() as i32, fy.floor() as i32);
+                let (tx, ty) = (fx - fx.floor(), fy - fy.floor());
+                let s = 0x1000 * (oi as u32 + 1);
+                let v = lat(s, lx, ly) * (1.0 - tx) * (1.0 - ty)
+                    + lat(s, lx + 1, ly) * tx * (1.0 - ty)
+                    + lat(s, lx, ly + 1) * (1.0 - tx) * ty
+                    + lat(s, lx + 1, ly + 1) * tx * ty;
+                n += v * amp;
+            }
+            field[(y * fw + x) as usize] = ((0.55 + n) * 64.0) as u8;
+        }
+    }
+    Bleed { ox, oy, field, fw, r: 0.0, bbox: BBox::empty(), seed, painted: Vec::new() }
+}
+
+/// Grow the bleed to nominal radius `new_r`: ink every newly claimed pixel
+/// (d² · 4096 ≤ R² · g², integer-only per pixel), plus the spatter droplets
+/// whose appearance thresholds R just crossed — flung ink landing ahead of
+/// the front, swallowed by it later.
+fn bleed_grow(surf: &mut Surface, b: &mut Bleed, new_r: f32, record: bool) {
+    let old_r = b.r;
+    if new_r <= old_r {
+        return;
+    }
+    b.r = new_r;
+    let (w, h) = (surf.w as i32, surf.h as i32);
+    let reach = (new_r * 1.6) as i32 + 2;
+    let y0 = (b.oy - reach).max(0);
+    let y1 = (b.oy + reach).min(h - 1);
+    let x0 = (b.ox - reach).max(0);
+    let x1 = (b.ox + reach).min(w - 1);
+    let r2 = (new_r * new_r) as u64;
+    let old2 = (old_r * old_r) as u64;
+    for y in y0..=y1 {
+        let frow = (y / BLEED_CELL) * b.fw;
+        for x in x0..=x1 {
+            let (dx, dy) = ((x - b.ox) as i64, (y - b.oy) as i64);
+            let d2 = (dx * dx + dy * dy) as u64;
+            let g = b.field[(frow + x / BLEED_CELL) as usize] as u64;
+            let g2 = g * g;
+            let lhs = d2 * 4096;
+            if lhs <= r2 * g2 && lhs > old2 * g2 {
+                if record && surf.luma(x, y) >= 128 {
+                    b.painted.push((x as u16, y as u16));
+                }
+                surf.put_px(x, y, BLACK);
+                b.bbox.add(x, y, 1);
+            }
+        }
+    }
+    for i in 0..40u32 {
+        let hh = splat_hash(b.seed ^ 0xD09, i);
+        let thr = 12.0 + (hh % 300) as f32;
+        if !(old_r < thr && thr <= new_r) {
+            continue;
+        }
+        let ang = ((hh >> 9) % 6283) as f32 / 1000.0;
+        let dist = thr * (1.25 + ((hh >> 20) % 80) as f32 / 100.0);
+        let rr = 2 + ((hh >> 27) % 6) as i32;
+        let (px, py) = (b.ox + (dist * ang.cos()) as i32, b.oy + (dist * ang.sin()) as i32);
+        if px > -20 && py > -20 && px < w + 20 && py < h + 20 {
+            for oy in -rr..=rr {
+                for ox in -rr..=rr {
+                    if ox * ox + oy * oy > rr * rr {
+                        continue;
+                    }
+                    let (qx, qy) = (px + ox, py + oy);
+                    if qx < 0 || qy < 0 || qx >= w || qy >= h {
+                        continue;
+                    }
+                    if record && surf.luma(qx, qy) >= 128 {
+                        b.painted.push((qx as u16, qy as u16));
+                    }
+                    surf.put_px(qx, qy, BLACK);
+                }
+            }
+            b.bbox.add(px, py, rr + 1);
+        }
+    }
+}
+
+/// Reabsorb an aborted bleed: restore exactly the pixels the bleed itself
+/// blackened, in the same staggered pattern as the drink dissolve. Ink that
+/// was already on the page (handwriting under the pool) was never recorded
+/// and is left untouched, keeping the screen true to the stroke model.
+fn bleed_absorb(surf: &mut Surface, disp: &display::Display, bl: &Bleed) {
+    if bl.painted.is_empty() {
+        return;
+    }
+    for stage in 0..8u32 {
+        for &(x, y) in &bl.painted {
+            if splat_seed(x as i32, y as i32) % 8 <= stage {
+                surf.put_px(x as i32, y as i32, WHITE);
+            }
+        }
+        let (x, y, w, h) = bl.bbox.rect();
+        disp.update(x, y, w, h, true);
+        std::thread::sleep(Duration::from_millis(45));
+    }
+}
+
 fn oracle_excuse(e: &str) -> String {
     if e.contains("no oracle") {
         "The diary lies dormant: it found no oracle. \
