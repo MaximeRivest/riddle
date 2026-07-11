@@ -290,6 +290,7 @@ mod tests {
 
     #[test]
     fn modal_renders_and_restores() {
+        crate::fb::test_init_screen();
         let (w, h) = (screen_w(), screen_h());
         let mut buf = vec![0xFFu8; w * h * 4];
         let ptr = buf.as_mut_ptr();
@@ -336,6 +337,7 @@ mod tests {
 
     #[test]
     fn sleep_page_renders_and_restores() {
+        crate::fb::test_init_screen();
         let (w, h) = (screen_w(), screen_h());
         let mut buf = vec![0xFFu8; w * h * 4];
         let ptr = buf.as_mut_ptr();

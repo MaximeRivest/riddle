@@ -20,6 +20,16 @@ pub fn screen_h() -> usize {
     SCREEN_DIMS.get().expect("init_screen not called before screen_h").1
 }
 
+/// Tests exercise geometry helpers without ever opening a display, so they
+/// need `init_screen` called explicitly. Any dimensions work for a test;
+/// this uses the Paper Pro's so tests match the values they were written
+/// against. Idempotent (and safe under parallel test execution) since it's
+/// the same `OnceLock::set` `init_screen` itself uses.
+#[cfg(test)]
+pub fn test_init_screen() {
+    init_screen(1620, 2160);
+}
+
 /// Grow-only pixel bounding box, used to build update/dissolve regions.
 #[derive(Clone, Copy, Debug)]
 pub struct BBox {

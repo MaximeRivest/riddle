@@ -185,6 +185,7 @@ mod tests {
 
     #[test]
     fn erase_forgets_covered_points_and_splits_strokes() {
+        crate::fb::test_init_screen();
         let (_buf, mut s) = surf();
         let mut ink = Ink::new();
         // A horizontal stroke across the page.
@@ -210,6 +211,7 @@ mod tests {
 
     #[test]
     fn erasing_everything_empties_the_ink() {
+        crate::fb::test_init_screen();
         let (_buf, mut s) = surf();
         let mut ink = Ink::new();
         ink.pen_point(&mut s, 100, 100, 3);
