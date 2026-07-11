@@ -28,6 +28,11 @@ mod quill_ffi {
 impl Display {
     pub fn open() -> io::Result<(Self, Surface)> {
         if let Ok(key) = std::env::var("QTFB_KEY") {
+            // Windowed AppLoad mode. FBFMT_RMPP_RGB565 is a Paper Pro
+            // ("ferrari") -specific wire format (see qtfb.rs), so this path
+            // is Ferrari-only; riddle ships with "qtfb": false in its
+            // manifest and always runs via takeover (below) instead. A
+            // Move-native qtfb format would need its own investigation.
             let key: i32 = key.parse().map_err(io::Error::other)?;
             let mut client = crate::qtfb::QtfbClient::connect(
                 key,
