@@ -53,6 +53,14 @@
   ],
   "presets": [
     {
+      "name": "Atlas Cloud",
+      "values": {
+        "RIDDLE_OPENAI_BASE": "https://api.atlascloud.ai/v1",
+        "RIDDLE_OPENAI_MODEL": "google/gemini-2.5-flash",
+        "RIDDLE_OPENAI_REASONING": ""
+      }
+    },
+    {
       "name": "Gemini",
       "values": {
         "RIDDLE_OPENAI_BASE": "https://generativelanguage.googleapis.com/v1beta/openai",
