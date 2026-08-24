@@ -1,0 +1,55 @@
+name: no-vendor-blob
+
+# reMarkable's libqsgepaper.so must never be redistributed by this repository.
+# quill/ links against it, but each user extracts it from their own device.
+# This job fails the build if the library — or anything under the ignored
+# vendor/build directories — ever becomes tracked.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: No proprietary vendor artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: a blob added in an earlier commit on this branch is
+          # still a leak, even if a later commit removed it.
+          fetch-depth: 0
+
+      - name: Check working tree
+        run: ./scripts/ci/check-no-vendor-blob.sh
+
+      - name: Check full history
+        run: |
+          # Any object ever named libqsgepaper.so, anywhere in reachable
+          # history. Documentation under quill/vendor/ is legitimate (it tells
+          # users how to fetch the library themselves), so match the library
+          # filename rather than the directory, and confirm by size — the real
+          # library is ~350KB, a README is under a kilobyte.
+          fail=0
+          while read -r sha path; do
+            [ -n "${path:-}" ] || continue
+            size=$(git cat-file -s "$sha" 2>/dev/null || echo 0)
+            if [ "$size" -ge 102400 ]; then
+              echo "  $path ($size bytes, object $sha)" >&2
+              fail=1
+            fi
+          done < <(git rev-list --objects --all \
+            | grep -E '(^|/)libqsgepaper\.so(\.[0-9.]+)?$' || true)
+
+          if [ "$fail" -ne 0 ]; then
+            echo >&2
+            echo "ERROR: reMarkable's proprietary library is present in git history." >&2
+            echo "History must be rewritten to remove it before this branch can ship." >&2
+            exit 1
+          fi
+          echo "OK: history is clean."
