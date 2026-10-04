@@ -154,6 +154,10 @@ riddle --oracle-test path/to/handwriting.png   # prints the streamed reply
 Measured ~0.9–1.1 s to first ink on-device. The HTTPS is built into riddle
 (pure-Rust, no extra libraries).
 
+### Optional — Sign in with ChatGPT
+
+The `riddle-chatgpt` companion lets eligible users sign in with ChatGPT and authorize use of their plan, without an API key. It runs on the tablet after a one-time browser sign-in on your computer. See [setup instructions](docs/CHATGPT.md). The existing API and pi backends remain available.
+
 ### Option B — pi (the power path)
 
 If you already run [`pi`](https://github.com/badlogic/pi-mono), riddle will use

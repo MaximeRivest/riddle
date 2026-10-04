@@ -15,5 +15,10 @@ install -m 755 ../quill/build/libquill.so dist/riddle/
 install -m 755 scripts/appload-launch.sh scripts/riddle-takeover.sh dist/riddle/
 install -m 644 external.manifest.json icon.png oracle.env.example settings.schema.json dist/riddle/
 
+# Build separately with scripts/build-chatgpt.sh to include this optional backend.
+if [ -f tools/chatgpt/dist/riddle-chatgpt-linux-arm64 ]; then
+    install -m 755 tools/chatgpt/dist/riddle-chatgpt-linux-arm64 dist/riddle/riddle-chatgpt
+fi
+
 echo "staged: $(du -sh dist/riddle | cut -f1) in dist/riddle/"
 echo "publish with: remagic publish dist/riddle -catalog-dir <remagic checkout>"

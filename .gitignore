@@ -4,3 +4,5 @@
 
 # Never commit a real API key.
 /oracle.env
+/chatgpt-auth/
+/tools/chatgpt/dist/
