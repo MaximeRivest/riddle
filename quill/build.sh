@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-SDK=~/rm-sdk-3.26
+SDK=~/rm-sdk-5.7.119
 ENV=$(ls $SDK/environment-setup-* | head -n1)
 # The SDK env script sets CC/CXX with target flags and $SDKTARGETSYSROOT.
 # It refuses to load when LD_LIBRARY_PATH is set.

@@ -8,11 +8,13 @@
 use std::io;
 use std::os::fd::RawFd;
 
-use crate::fb::{SCREEN_H, SCREEN_W};
+// Screen dimensions are passed to PenDevice at runtime.
 
 // Digitizer axis ranges on the Paper Pro ("Elan marker input").
-const DIGI_MAX_X: i32 = 11180;
-const DIGI_MAX_Y: i32 = 15340;
+const DIGI_MIN_X: i32 = 0;
+const DIGI_MAX_X: i32 = 9620;
+const DIGI_MIN_Y: i32 = 0;
+const DIGI_MAX_Y: i32 = 13000;
 pub const MAX_PRESSURE: i32 = 4096;
 
 const EV_SYN: u16 = 0;
@@ -48,6 +50,8 @@ pub struct PenSample {
 pub struct PenDevice {
     fd: RawFd,
     // Accumulated state between SYN_REPORTs.
+    screen_w: i32,
+    screen_h: i32,
     raw_x: i32,
     raw_y: i32,
     pressure: i32,
@@ -58,7 +62,7 @@ pub struct PenDevice {
 
 impl PenDevice {
     /// Find and grab the marker input device.
-    pub fn open() -> io::Result<Self> {
+    pub fn open(screen_w: usize, screen_h: usize) -> io::Result<Self> {
         let path = find_marker_device()?;
         let cpath = std::ffi::CString::new(path.clone()).unwrap();
         let fd = unsafe { libc::open(cpath.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK) };
@@ -71,7 +75,9 @@ impl PenDevice {
         }
         eprintln!("riddle: pen device {path} opened (grabbed: {})", grab == 0);
         Ok(Self {
-            fd,
+            screen_w: screen_w as i32,
+            screen_h: screen_h as i32,
+	    fd,
             raw_x: 0,
             raw_y: 0,
             pressure: 0,
@@ -127,8 +133,14 @@ impl PenDevice {
                         if self.dirty {
                             self.dirty = false;
                             out.push(PenSample {
-                                x: self.raw_x * (SCREEN_W as i32 - 1) / DIGI_MAX_X,
-                                y: self.raw_y * (SCREEN_H as i32 - 1) / DIGI_MAX_Y,
+				 x: (self.raw_x - DIGI_MIN_X)
+				        .clamp(0, DIGI_MAX_X - DIGI_MIN_X)
+				        * (self.screen_w - 1)
+				        / (DIGI_MAX_X - DIGI_MIN_X),
+				 y: (self.raw_y - DIGI_MIN_Y)
+				        .clamp(0, DIGI_MAX_Y - DIGI_MIN_Y)
+				        * (self.screen_h - 1)
+				        / (DIGI_MAX_Y - DIGI_MIN_Y),
                                 pressure: self.pressure,
                                 tool: self.tool,
                                 touching: self.touching,

@@ -2,7 +2,7 @@
 //! the diary's gestures; touching the pen to the page dismisses it. Detection
 //! is local geometry — no oracle — so the guide works even with no network.
 
-use crate::fb::{BBox, SCREEN_H, SCREEN_W};
+use crate::fb::BBox;
 use crate::script;
 use crate::surface::{Surface, BLACK, WHITE};
 use ab_glyph::FontRef;
@@ -154,10 +154,10 @@ pub fn show(surf: &mut Surface, font: &FontRef, takeover: bool) -> Help {
     for l in body {
         wmax = wmax.max(script::measure(font, l, BODY_PX));
     }
-    let pw = (wmax as usize + 2 * PAD).min(SCREEN_W - 40);
+    let pw = (wmax as usize + 2 * PAD).min(surf.w.saturating_sub(40));
     let ph = PAD + title_h + line_h / 2 + body.len() * line_h + footer_h + PAD;
-    let px = (SCREEN_W - pw) / 2;
-    let py = (SCREEN_H.saturating_sub(ph)) / 2;
+    let px = (surf.w - pw) / 2;
+    let py = (surf.h.saturating_sub(ph)) / 2;
 
     let saved = surf.copy_rect(px, py, pw, ph);
     surf.fill_rect(px, py, pw, ph, WHITE);
@@ -192,18 +192,18 @@ impl Help {
 /// Replace the page with the full-screen sleep card; returns the saved page
 /// pixels so waking can restore them exactly.
 pub fn show_sleep(surf: &mut Surface, font: &FontRef) -> Vec<u8> {
-    let saved = surf.copy_rect(0, 0, SCREEN_W, SCREEN_H);
-    surf.fill_rect(0, 0, SCREEN_W, SCREEN_H, WHITE);
-    frame(surf, 48, 48, SCREEN_W - 96, SCREEN_H - 96, 4);
-    frame(surf, 66, 66, SCREEN_W - 132, SCREEN_H - 132, 1);
-    let y = SCREEN_H * 38 / 100;
-    blit_centered(surf, font, "The diary sleeps.", 116.0, 0, SCREEN_W, y);
-    blit_centered(surf, font, "Press the button to wake it.", 56.0, 0, SCREEN_W, y + 230);
+    let saved = surf.copy_rect(0, 0, surf.w, surf.h);
+    surf.fill_rect(0, 0, surf.w, surf.h, WHITE);
+    frame(surf, 48, 48, surf.w - 96, surf.h - 96, 4);
+    frame(surf, 66, 66, surf.w - 132, surf.h - 132, 1);
+    let y = surf.h * 38 / 100;
+    blit_centered(surf, font, "The diary sleeps.", 116.0, 0, surf.w, y);
+    blit_centered(surf, font, "Press the button to wake it.", 56.0, 0, surf.w, y + 230);
     saved
 }
 
 pub fn restore_sleep(surf: &mut Surface, saved: &[u8]) {
-    surf.paste_rect(0, 0, SCREEN_W, SCREEN_H, saved);
+    surf.paste_rect(0, 0, surf.w, surf.h, saved);
 }
 
 fn frame(surf: &mut Surface, x: usize, y: usize, w: usize, h: usize, t: usize) {
@@ -227,6 +227,7 @@ fn blit_centered(surf: &mut Surface, font: &FontRef, text: &str, px_size: f32, p
 
 #[cfg(test)]
 mod tests {
+    use crate::fb::{SCREEN_H, SCREEN_W};
     use super::*;
 
     fn stroke(pts: &[(i32, i32)]) -> Vec<(i32, i32, i32)> {

@@ -7,7 +7,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-SDK=~/rm-sdk-3.26
+SDK=~/rm-sdk-5.7.119
 ENV=$(ls "$SDK"/environment-setup-* | head -n1)
 unset LD_LIBRARY_PATH          # SDK env refuses to source otherwise
 source "$ENV"                  # sets CC=aarch64-remarkable-linux-gcc ... --sysroot=...

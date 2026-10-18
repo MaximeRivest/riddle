@@ -1,7 +1,7 @@
 //! Geometry helpers. Drawing lives in surface.rs.
 
-pub const SCREEN_W: usize = 1620;
-pub const SCREEN_H: usize = 2160;
+pub const SCREEN_W: usize = 1404;
+pub const SCREEN_H: usize = 1872;
 
 /// Grow-only pixel bounding box, used to build update/dissolve regions.
 #[derive(Clone, Copy, Debug)]
@@ -27,5 +27,20 @@ impl BBox {
     }
     pub fn rect(&self) -> (i32, i32, i32, i32) {
         (self.x0, self.y0, self.x1 - self.x0 + 1, self.y1 - self.y0 + 1)
+    }
+    pub fn union(self, other: Self) -> Self {
+        if self.is_empty() {
+            return other;
+        }
+        if other.is_empty() {
+            return self;
+        }
+
+        Self {
+            x0: self.x0.min(other.x0),
+            y0: self.y0.min(other.y0),
+            x1: self.x1.max(other.x1),
+            y1: self.y1.max(other.y1),
+        }
     }
 }
